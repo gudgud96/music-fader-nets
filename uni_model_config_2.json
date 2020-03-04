@@ -1,0 +1,16 @@
+{
+    "batch_size": 1024,
+    "n_epochs": 50,
+    "data_path": "/scratch/ry649/VAE_data/data_merge/data.npy",
+    "lr": 1e-3,
+    "decay": 0.9999,
+    "if_parallel": false,
+    "name": "music_attr_vae_reg_bs1024",
+    "hidden_dim": 512,
+    "z_dim": 128,
+    "beta": 0.1,
+    "time_step": 32,
+    "is_class": false,
+    "is_res": false,
+    "is_adversarial": false
+}
