@@ -1,11 +1,10 @@
 {
     "batch_size": 128,
-    "n_epochs": 20,
-    "data_path": "/scratch/ry649/VAE_data/data_merge/data.npy",
+    "n_epochs": 200,
     "lr": 1e-3,
     "decay": 0.9999,
     "if_parallel": false,
-    "name": "music_attr_vae_reg_vgm",
+    "name": "lc_arousal",
     "hidden_dim": 512,
     "z_dim": 128,
     "beta": 0.1,

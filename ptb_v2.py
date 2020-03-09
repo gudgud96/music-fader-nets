@@ -290,29 +290,6 @@ def get_classic_piano():
         n_density = [sum(k) / len(k) for k in note_density_lst]
         print(np.mean(n_density), np.std(n_density))
 
-        # c_r_lst, c_n_lst = [], []
-        # for r in rhythm_lst:
-        #     r_density = Counter(r)[1] / len(r)
-        #     if r_density < 0.3: c_r = 0
-        #     elif r_density < 0.5: c_r = 1
-        #     else: c_r = 2
-        #     c_r_lst.append(c_r)
-
-        # for n in note_density_lst:
-        #     n_density = sum(n) / len(n)
-        #     if n_density <= 2: c_n = 0
-        #     elif n_density <= 3.5: c_n = 1
-        #     else: c_n = 2
-        #     c_n_lst.append(c_n)
-        
-        # print(Counter(c_r_lst))
-        # print(Counter(c_n_lst))
-
-        # length = 0
-        # for d in data_lst:
-        #     length += len(np.trim_zeros(d))
-        # print("Avg length: ", length / len(data_lst))
-
     return data_lst, rhythm_lst, note_density_lst, chroma_lst
 
 
@@ -800,6 +777,27 @@ def get_classic_piano_v4_long():
     return data_lst, rhythm_lst, note_density_lst, chroma_lst
 
 
+def get_vgmidi():
+    data_lst = np.load("filtered_songs/song_tokens.npy", allow_pickle=True)
+    rhythm_lst = np.load("filtered_songs/rhythm_lst.npy", allow_pickle=True)
+    note_density_lst = np.load("filtered_songs/note_lst.npy", allow_pickle=True)
+    valence_lst = np.load("filtered_songs/valence_lst.npy")
+    arousal_lst = np.load("filtered_songs/arousal_lst.npy")
+
+    if os.path.exists("filtered_songs/chroma_lst.npy"):
+        chroma_lst = np.load("filtered_songs/chroma_lst.npy")
+    else:
+        chroma_lst = []
+        for _, token in tqdm(enumerate(data_lst), total=len(data_lst)):
+            pm = magenta_decode_midi(token)
+            pm.write("vgmidi_tmp.mid")
+            chroma = get_harmony_vector("vgmidi_tmp.mid", is_one_hot=True)
+            chroma_lst.append(chroma)
+        chroma_lst = np.array(chroma_lst)
+        np.save("filtered_songs/chroma_lst.npy", chroma_lst)
+    
+    return data_lst, rhythm_lst, note_density_lst, arousal_lst, valence_lst, chroma_lst
+
 
 class MusicAttrDataset(Dataset):
     def __init__(self, data, rhythm, tempo, note, velocity, chroma, mode="train"):
@@ -902,18 +900,6 @@ class MusicAttrDataset2(Dataset):
         return x, r, n, c, c_r, c_n, r_density, n_density
     
     def get_classes(self, r, n):
-        # r_density = Counter(r)[1] / len(r)
-        # if r_density < 0.25: c_r = 0
-        # elif r_density < 0.5: c_r = 1
-        # elif r_density < 0.75: c_r = 2
-        # else: c_r = 3
-
-        # n_density = sum(n) / len(n)
-        # if n_density <= 2: c_n = 0
-        # elif n_density <= 4: c_n = 1
-        # elif n_density <= 6: c_n = 2
-        # else: c_n = 3
-
         r_density = Counter(r)[1] / len(r)
         if r_density < 0.3: c_r = 0
         elif r_density < 0.5: c_r = 1
@@ -925,6 +911,54 @@ class MusicAttrDataset2(Dataset):
         else: c_n = 2
 
         return c_r, c_n
+
+
+class MusicAttrDataset3(Dataset):
+    def __init__(self, data, rhythm, note, chroma, arousal, valence, mode="train"):
+        super().__init__()
+        inputs = data, rhythm, note, chroma, arousal, valence
+        indexed = []
+
+        tlen, vlen = int(0.9 * len(data)), int(0.95 * len(data))
+
+        for input in inputs:
+            if mode == "train":
+                indexed.append(input[:tlen])
+            elif mode == "val":
+                indexed.append(input[tlen:vlen])
+            elif mode == "test":
+                indexed.append(input[vlen:])
+
+        self.data, self.rhythm, self.note, self.chroma, self.arousal, self.valence = indexed
+        self.data = [torch.Tensor(np.insert(k, -1, 1)) for k in self.data]
+        self.data = torch.nn.utils.rnn.pad_sequence(self.data, batch_first=True)
+        self.rhythm = [torch.Tensor(k) for k in self.rhythm]
+        self.rhythm = torch.nn.utils.rnn.pad_sequence(self.rhythm, batch_first=True)
+        self.note = [torch.Tensor(k) for k in self.note]
+        self.note = torch.nn.utils.rnn.pad_sequence(self.note, batch_first=True)
+
+        self.r_density = [Counter(k)[1] / len(k) for k in self.rhythm]
+        self.n_density = np.array([sum(k) / len(k) for k in self.note])
+
+        self.arousal[self.arousal >= 0] = 1
+        self.arousal[self.arousal < 0] = 0
+           
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        x = self.data[idx]
+        r = self.rhythm[idx]
+        n = self.note[idx]
+        c = self.chroma[idx]
+        a = self.arousal[idx]
+        v  =self.valence[idx]
+        
+        r_density = self.r_density[idx]
+        n_density = self.n_density[idx]
+        
+        return x, r, n, c, a, v, r_density, n_density
+
 
 
 class MusicPolyphonic(Dataset):

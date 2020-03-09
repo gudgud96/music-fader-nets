@@ -14,7 +14,7 @@ from collections import Counter
 from torch.distributions import Normal
 from sklearn.linear_model import LinearRegression
 from scipy.stats import pearsonr
-from sklearn.metrics import mutual_info_score
+from sklearn.metrics import mutual_info_score, accuracy_score, f1_score, precision_score, recall_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set()
@@ -77,6 +77,36 @@ def rhythm_shift_reg(d, r, n, c, c_r, c_n, target_z_value):
     return out, z_r_0
 
 
+def rhythm_shift_reg_hierachical(d, r, n, c, c_r, c_n, target_z_value):
+    d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
+    r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
+    n_oh = convert_to_one_hot(n, NOTE_DIMS).unsqueeze(0)
+    c = c.unsqueeze(0)
+
+    c_r_oh = torch.zeros(3,).cuda().unsqueeze(0)
+    c_r_oh[:,c_r] = 1
+    c_n_oh = torch.zeros(3,).cuda().unsqueeze(0)
+    c_n_oh[:,c_n] = 1
+    
+    res = model(d_oh, r_oh, n_oh, c, c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+    output, dis, z_out = res
+
+    # get original latent variables
+    dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+    z_r = repar(dis_r_g.mean, dis_r_g.stddev)
+    z_n = repar(dis_n_g.mean, dis_n_g.stddev)
+    
+    z_r_0 = z_r[:, 0].item()
+    
+    # shifting
+    z_r[:, 0] = target_z_value
+    model.eval()
+    z = torch.cat([z_r, z_n, c], dim=1)  
+    
+    out = model.global_decoder(z, steps=100)
+    return out, z_r_0, z_r, z_n
+
+
 def rhythm_shift_reg_v3(d, r, n, c, c_r, c_n, target_z_value):
     d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
     r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
@@ -122,8 +152,10 @@ def get_classes(r, n):
     
     return r_density, n_density, c_r, c_n
 
+
 def run_through(dl):
     r_mean, n_mean, t_mean, v_mean = [], [], [], []
+    r_lst, n_lst = [], []
     c_r_lst, c_n_lst, c_t_lst, c_v_lst = [], [], [], []
     z_r_lst, z_n_lst = [], []
     r_density_lst, n_density_lst = [], []
@@ -136,6 +168,8 @@ def run_through(dl):
                     n.cuda().long(), c.cuda().float()
         c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
         
+        r_lst.append(r)
+        n_lst.append(n)
         r_density_lst.append(r_density.float())
         n_density_lst.append(n_density.float())
 
@@ -158,34 +192,6 @@ def run_through(dl):
         z_r, z_n = z_out
         dis_r, dis_n = dis
         out, r_out, n_out, _, _ = output
-
-        # find actual attributes
-        # for idx, example in enumerate(out):
-        #     try:
-        #         pm = magenta_decode_midi(clean_output(example))
-        #         pm.write('rhythm_temp_2.mid')
-
-        #         # get class
-        #         track = pypianoroll.parse('rhythm_temp_2.mid', beat_resolution=4).tracks
-        #         if len(track) < 1: 
-        #             r_density_shifted, n_density_shifted = 0, 0
-        #             r_density_lst_actual.append(r_density_shifted)
-        #             n_density_lst_actual.append(n_density_shifted)
-        #             continue
-        
-        #         pr = track[0].pianoroll
-        #         _, rhythm, note, chroma, _ = get_music_attributes(pr, beat=4)
-        #         r_density_shifted, n_density_shifted, _, _ = get_classes(rhythm, note)
-        #         r_density_lst_actual.append(r_density_shifted)
-        #         n_density_lst_actual.append(n_density_shifted)
-
-        #     except:
-        #         r_density_shifted, n_density_shifted = 0, 0
-        #         r_density_lst_actual.append(r_density_shifted)
-        #         n_density_lst_actual.append(n_density_shifted)
-        
-        # temp_count += len(r_density)
-        # print(len(r_density_lst_actual), temp_count)
         
         z_r_lst.append(z_r.cpu().detach())
         z_n_lst.append(z_n.cpu().detach())
@@ -200,6 +206,8 @@ def run_through(dl):
     n_mean = torch.cat(n_mean, dim=0).cpu().detach().numpy()
     r_density_lst = torch.cat(r_density_lst, dim=0).cpu().detach().numpy()
     n_density_lst = torch.cat(n_density_lst, dim=0).cpu().detach().numpy()
+    r_lst = torch.cat(r_lst, dim=0).cpu().detach().numpy()
+    n_lst = torch.cat(n_lst, dim=0).cpu().detach().numpy()
 
     c_r_lst = torch.cat(c_r_lst, dim=0).cpu().detach().numpy()
     c_n_lst = torch.cat(c_n_lst, dim=0).cpu().detach().numpy()
@@ -219,9 +227,11 @@ def run_through(dl):
     # print(z_r_0_lst[:10])
 
     return r_density_lst, n_density_lst, \
+            r_lst, n_lst, \
             r_mean, n_mean, \
             c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
             r_min, r_max, n_min, n_max
+
 
 def run_through_v3(dl):
     r_mean, n_mean, t_mean, v_mean = [], [], [], []
@@ -342,39 +352,249 @@ def run_through_note(dl):
     return n_density_lst, n_mean, z_n_0_lst, z_n_rest_lst
 
 
-def train_test_evaluation(dl):
-    r_density_lst, n_density_lst, \
-                r_mean, n_mean, \
-                c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
-                r_min, r_max, n_min, n_max = run_through(dl)
+def run_through_hierachical(dl):
+    r_mean, n_mean, t_mean, v_mean = [], [], [], []
+    r_lst, n_lst = [], []
+    c_r_lst, c_n_lst, c_t_lst, c_v_lst = [], [], [], []
+    z_r_lst, z_n_lst = [], []
+    r_density_lst, n_density_lst = [], []
+    r_density_lst_actual, n_density_lst_actual = [], []
+    temp_count = 0
+
+    for j, x in tqdm(enumerate(dl), total=len(dl)):
+        d, r, n, c, c_r, c_n, r_density, n_density = x
+        d, r, n, c = d.cuda().long(), r.cuda().long(), \
+                    n.cuda().long(), c.cuda().float()
+        c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
+        
+        r_lst.append(r)
+        n_lst.append(n)
+        r_density_lst.append(r_density.float())
+        n_density_lst.append(n_density.float())
+
+        d_oh = convert_to_one_hot(d, EVENT_DIMS)
+        r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
+        n_oh = convert_to_one_hot(n, NOTE_DIMS)
+
+        c_r_oh = convert_to_one_hot(c_r, 4)
+        c_n_oh = convert_to_one_hot(c_n, 4)
+
+        res = model(d_oh, r_oh, n_oh, c, c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+
+        # package output
+        output, dis, z_out = res
+
+        out, r_out, n_out, _, _ = output
+        z_r, z_n, z_h, z_r_g, z_n_g = z_out
+        dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+
+        c_r_lst.append(c_r.cpu().detach())
+        c_n_lst.append(c_n.cpu().detach())
+        
+        # hierachical part
+        z_r_lst.append(z_r_g.cpu().detach())
+        z_n_lst.append(z_n_g.cpu().detach())
+        
+        r_mean.append(dis_r_g.mean.cpu().detach())
+        n_mean.append(dis_n_g.mean.cpu().detach())
+
+    r_mean = torch.cat(r_mean, dim=0).cpu().detach().numpy()
+    n_mean = torch.cat(n_mean, dim=0).cpu().detach().numpy()
+    r_density_lst = torch.cat(r_density_lst, dim=0).cpu().detach().numpy()
+    n_density_lst = torch.cat(n_density_lst, dim=0).cpu().detach().numpy()
+    r_lst = torch.cat(r_lst, dim=0).cpu().detach().numpy()
+    n_lst = torch.cat(n_lst, dim=0).cpu().detach().numpy()
+
+    c_r_lst = torch.cat(c_r_lst, dim=0).cpu().detach().numpy()
+    c_n_lst = torch.cat(c_n_lst, dim=0).cpu().detach().numpy()
+    z_r_lst = torch.cat(z_r_lst, dim=0).cpu().detach().numpy()
+    z_n_lst = torch.cat(z_n_lst, dim=0).cpu().detach().numpy()
+
+    # find value to set at z_r_0
+    z_r_0_lst = z_r_lst[:, 0]
+    z_r_rest_lst = z_r_lst[:, 1:]
+    z_n_0_lst = z_n_lst[:, 0]
+    z_n_rest_lst = z_n_lst[:, 1:]
+
+    r_min, r_max = np.amin(z_r_0_lst), np.amax(z_r_0_lst)
+    n_min, n_max = np.amin(z_n_0_lst), np.amax(z_n_0_lst)
+
+    # print(r_density_lst[:10])
+    # print(z_r_0_lst[:10])
+
+    return r_density_lst, n_density_lst, \
+            r_lst, n_lst, \
+            r_mean, n_mean, \
+            c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+            r_min, r_max, n_min, n_max
+
+
+def run_through_hierachical_vgm(vgm_dl):
+    r_mean, n_mean, t_mean, v_mean = [], [], [], []
+    r_lst, n_lst = [], []
+    a_lst, v_lst = [], []
+    z_r_lst, z_n_lst, z_h_lst = [], [], []
+    r_density_lst, n_density_lst = [], []
+    r_density_lst_actual, n_density_lst_actual = [], []
+    temp_count = 0
+
+    for j, x in tqdm(enumerate(vgm_dl), total=len(vgm_dl)):
+        d, r, n, c, a, v, r_density, n_density = x
+        d, r, n, c = d.cuda().long(), r.cuda().long(), \
+                    n.cuda().long(), c.cuda().float()
+        
+        r_lst.append(r)
+        n_lst.append(n)
+        r_density_lst.append(r_density.float())
+        n_density_lst.append(n_density.float())
+
+        d_oh = convert_to_one_hot(d, EVENT_DIMS)
+        r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
+        n_oh = convert_to_one_hot(n, NOTE_DIMS)
+
+        res = model(d_oh, r_oh, n_oh, c, None, None, is_class=is_class, is_res=is_res)
+
+        # package output
+        output, dis, z_out = res
+        out, r_out, n_out, _, _ = output
+        z_r, z_n, z_h, z_r_g, z_n_g = z_out
+        dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+
+        a_lst.append(a.cpu().detach())
+        
+        # hierachical part
+        z_r_lst.append(z_r_g.cpu().detach())
+        z_n_lst.append(z_n_g.cpu().detach())
+        z_h_lst.append(z_h.cpu().detach())
+        
+        r_mean.append(dis_r_g.mean.cpu().detach())
+        n_mean.append(dis_n_g.mean.cpu().detach())
+
+    r_mean = torch.cat(r_mean, dim=0).cpu().detach().numpy()
+    n_mean = torch.cat(n_mean, dim=0).cpu().detach().numpy()
+    r_density_lst = torch.cat(r_density_lst, dim=0).cpu().detach().numpy()
+    n_density_lst = torch.cat(n_density_lst, dim=0).cpu().detach().numpy()
+    r_lst = torch.cat(r_lst, dim=0).cpu().detach().numpy()
+    n_lst = torch.cat(n_lst, dim=0).cpu().detach().numpy()
+    a_lst = torch.cat(a_lst, dim=0).cpu().detach().numpy()
+
+    c_r_lst = []
+    c_n_lst = []
+    z_r_lst = torch.cat(z_r_lst, dim=0).cpu().detach().numpy()
+    z_n_lst = torch.cat(z_n_lst, dim=0).cpu().detach().numpy()
+    z_h_lst = torch.cat(z_h_lst, dim=0).cpu().detach().numpy()
+
+    # find value to set at z_r_0
+    z_r_0_lst = z_r_lst[:, 0]
+    z_r_rest_lst = z_r_lst[:, 1:]
+    z_n_0_lst = z_n_lst[:, 0]
+    z_n_rest_lst = z_n_lst[:, 1:]
+
+    r_min, r_max = np.amin(z_r_0_lst), np.amax(z_r_0_lst)
+    n_min, n_max = np.amin(z_n_0_lst), np.amax(z_n_0_lst)
+
+    # print(r_density_lst[:10])
+    # print(z_r_0_lst[:10])
+
+    return r_density_lst, n_density_lst, a_lst, \
+            r_lst, n_lst, \
+            r_mean, n_mean, \
+            c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+            z_h_lst, \
+            r_min, r_max, n_min, n_max
+
+
+
+def consistency_metric(density_lst, z_lst, gt_is_one=True):
+    density_dict = {}
+    for i in range(len(density_lst)):
+        key = str(density_lst[i])
+        if key in density_dict:
+            density_dict[key].append(i)
+        else:
+            density_dict[key] = []
+            density_dict[key].append(i)
     
-    # r_density_dict = {}
-    # for i, val in enumerate(r_density_lst):
-    #     if val in r_density_dict:
-    #         r_density_dict[val].append(z_r_0_lst[i])
-    #     else:
-    #         r_density_dict[val] = []
-    #         r_density_dict[val].append(z_r_0_lst[i])
-    
-    # r_keys = sorted(list(r_density_dict.keys()))
-    # for key in r_keys:
-    #     lst = np.array(r_density_dict[key])
-    #     print(key, np.mean(lst), np.std(lst))
-    
-    # original
+    argmin_lst = []
+
+    avg_var = np.zeros(256,)
+    count = 0
+    for key in density_dict:
+        # select z latents with same density value
+        idx = density_dict[key]
+
+        if len(idx) >= 3:
+            # get the average latent value
+            z_mean = np.average(z_lst[idx, :], axis=0)
+
+            var_z = np.zeros(256,)
+            for z in z_lst[idx, :]:
+                var = np.power(z - z_mean, 2)
+                var_z += var
+            var_z /= len(z_lst[idx, :]) - 1     # sample variance
+            avg_var += var_z
+
+            count += 1
+
+    avg_var /= count                                # average across samples
+    avg_var = avg_var / np.std(z_lst, axis=0)       # normalize by std of dataset
+
+    avg_var_idx = np.argsort(avg_var)[:128]         # first 128 dim 
+    y_true, y_pred = np.zeros(256,), np.zeros(256,)
+    y_pred[avg_var_idx] = 1
+    if gt_is_one:                   # use for note density
+        y_true[range(128, 256)] = 1 
+    else:
+        y_true[range(128)] = 1     # ground truth is first 128 dim corresponds to rhythm
+
+    print("F1: ", f1_score(y_true, y_pred))
+    print("Precision: ", precision_score(y_true, y_pred))
+    print("Recall: ", recall_score(y_true, y_pred))
+    print("Acc: ", accuracy_score(y_true, y_pred))
+    print()
+
+
+def train_test_evaluation(dl, is_hierachical=False, is_vgmidi=False):
+
+    if not is_hierachical:
+        r_density_lst, n_density_lst, \
+                    r_lst, n_lst, \
+                    r_mean, n_mean, \
+                    c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+                    r_min, r_max, n_min, n_max = run_through(dl)
+    else:
+        if not is_vgmidi:
+            r_density_lst, n_density_lst, \
+                        r_lst, n_lst, \
+                        r_mean, n_mean, \
+                        c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+                        r_min, r_max, n_min, n_max = run_through_hierachical(dl)
+        else:
+            r_density_lst, n_density_lst, a_lst, \
+                        r_lst, n_lst, \
+                        r_mean, n_mean, \
+                        c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+                        z_h_lst, \
+                        r_min, r_max, n_min, n_max = run_through_hierachical_vgm(dl)
+
+    z_r_lst = np.concatenate([np.expand_dims(z_r_0_lst, axis=-1), z_r_rest_lst], axis=-1)
+    z_n_lst = np.concatenate([np.expand_dims(z_n_0_lst, axis=-1), z_n_rest_lst], axis=-1)
+    z_lst = np.concatenate([z_r_lst, z_n_lst], axis=-1)
+
+    # consistency
+    print("Rhythm consistency")
+    consistency_metric(r_lst, z_lst, gt_is_one=False)
+    print("Note consistency")
+    consistency_metric(n_lst, z_lst, gt_is_one=True)
+
+    # monotonicity
     r_density_lst = np.expand_dims(np.array(r_density_lst), axis=-1)
     z_r_0_lst = np.expand_dims(z_r_0_lst, axis=-1)
     r_mean_0_lst = np.expand_dims(r_mean[:, 0], axis=-1)
 
     reg = LinearRegression().fit(z_r_0_lst, r_density_lst)
     rhythm_linear_score = reg.score(z_r_0_lst, r_density_lst)
-    print("Rhythm linear score (z): {}".format(rhythm_linear_score))
-
-    # actual
-    # r_density_lst_actual = np.expand_dims(np.array(r_density_lst_actual), axis=-1)
-    # reg = LinearRegression().fit(z_r_0_lst, r_density_lst_actual)
-    # rhythm_linear_score = reg.score(z_r_0_lst, r_density_lst_actual)
-    # print("Rhythm linear score actual (z): {}".format(rhythm_linear_score))
+    print("Rhythm monotonicity score (z): {}".format(rhythm_linear_score))
 
     plt.figure(figsize=(8,8))
     ax = plt.axes()
@@ -382,33 +602,14 @@ def train_test_evaluation(dl):
     plt.savefig("rhythm_test_plot.png")
     plt.close()
     
-    # n_density_dict = {}
-    # for i, val in enumerate(n_density_lst):
-    #     if val in n_density_dict:
-    #         n_density_dict[val].append(z_n_0_lst[i])
-    #     else:
-    #         n_density_dict[val] = []
-    #         n_density_dict[val].append(z_n_0_lst[i])
-    
-    # n_keys = sorted(list(n_density_dict.keys()))
-    # for key in n_keys:
-    #     lst = np.array(n_density_dict[key])
-    #     print(key, np.mean(lst), np.std(lst))
-    
-    # original
     n_density_lst = np.expand_dims(np.array(n_density_lst), axis=-1)
     z_n_0_lst = np.expand_dims(z_n_0_lst, axis=-1)
     n_mean_0_lst = np.expand_dims(n_mean[:, 0], axis=-1)
 
     reg = LinearRegression().fit(z_n_0_lst, n_density_lst)
     note_linear_score = reg.score(z_n_0_lst, n_density_lst)
-    print("Note linear score (z): {}".format(note_linear_score))
-
-    # actual
-    # n_density_lst_actual = np.expand_dims(np.array(n_density_lst_actual), axis=-1)
-    # reg = LinearRegression().fit(z_n_0_lst, n_density_lst_actual)
-    # note_linear_score = reg.score(z_n_0_lst, n_density_lst_actual)
-    # print("Note linear score (z) actual: {}".format(note_linear_score))
+    print("Note monotonicity score (z): {}".format(note_linear_score))
+    print()
 
     plt.figure(figsize=(8,8))
     ax = plt.axes()
@@ -416,8 +617,22 @@ def train_test_evaluation(dl):
     plt.savefig("note_test_plot.png")
     plt.close()
 
-    return r_min, r_max, n_min, n_max
-        
+    if is_vgmidi:
+        a_lst = np.expand_dims(np.array(a_lst), axis=-1)
+        z_h_0_lst = np.expand_dims(z_h_lst[:, 0], axis=-1)
+
+        reg = LinearRegression().fit(z_h_0_lst, a_lst)
+        arousal_linear_score = reg.score(z_h_0_lst, a_lst)
+        print("Arousal monotonicity score (z): {}".format(arousal_linear_score))
+        print()
+
+    # get r and n std
+    r_std = np.std(r_lst)
+    n_std = np.std(n_lst)
+
+    return r_min, r_max, n_min, n_max, r_std, n_std
+
+
 def repar(mu, stddev, sigma=1):
     eps = Normal(0, sigma).sample(sample_shape=stddev.size()).cuda()
     z = mu + stddev * eps  # reparameterization trick
@@ -470,7 +685,7 @@ def train_test_evaluation_note(dl):
     # print("Note pearson score: {}".format(note_pearson_score))
 
 
-def rhythm_generation_evaluation(ds, r_min, r_max, is_mse=False):
+def rhythm_generation_evaluation(ds, r_min, r_max, r_std, n_std, is_mse=False):
     # run generation, calculate linear regression score
     gap = (r_max - r_min) / 8
     value_lst = np.array([r_min + k * gap for k in range(8)])
@@ -574,17 +789,19 @@ def rhythm_generation_evaluation(ds, r_min, r_max, is_mse=False):
         r_density_lst_new = []
     
     # consistency
-    r_out_all_lst = np.array(r_out_all_lst)
-    n_out_all_lst = np.array(n_out_all_lst)
+    r_out_all_lst = np.array(r_out_all_lst) / r_std
+    n_out_all_lst = np.array(n_out_all_lst) / n_std
     
     consistency_score = np.average(np.std(r_out_all_lst, axis=0))
+    variance_score = np.average(np.std(r_out_all_lst, axis=-1))
     restrictiveness_score = np.average(np.std(n_out_all_lst, axis=-1))
     monotonicity_score = sum(result) / len(result)
 
     # monotonicity
-    print("Average consistency: ", consistency_score)
-    print("Average restrictiveness: ", restrictiveness_score)
-    print("Average monotonicity:", monotonicity_score)
+    print("Generator consistency: ", consistency_score)
+    print("Generator variance: ", variance_score)
+    print("Generator restrictiveness: ", restrictiveness_score)
+    print("Generator monotonicity:", monotonicity_score)
 
     plt.figure(figsize=(8,8))
     x, y = [], []
@@ -599,7 +816,132 @@ def rhythm_generation_evaluation(ds, r_min, r_max, is_mse=False):
     plt.savefig("rhythm_eval_plot.png")
     plt.close()
     
+
+def rhythm_generation_evaluation_hierachical(ds, r_min, r_max, r_std, n_std, is_mse=False):
+    # run generation, calculate linear regression score
+    gap = (r_max - r_min) / 8
+    value_lst = np.array([r_min + k * gap for k in range(8)])
+    print(r_min, r_max)
+    print(value_lst)
+    r_density_lst_new = []
+    result = []
+    i = 0
+
+    r_out_all_lst = []
+    n_out_all_lst = []
+
+    r_values_dict = {}
+
+    while len(result) < 100:
+        print(len(result), end="\r")
+        r_density_lst = []
+        n_density_lst = []
+        z_r_lst_infer = []
+        z_n_lst_infer = []
+        z_r_lst = []
+        z_n_lst = []
+
+        d, r, n, c, c_r, c_n, r_density, n_density = ds[i]
+        d, r, n, c = torch.from_numpy(d).cuda().long(), torch.from_numpy(r).cuda().long(), \
+                    torch.from_numpy(n).cuda().long(), torch.from_numpy(c).cuda().float()
+        
+        r_density_lst.append(r_density)
+        n_density_lst.append(n_density)
+
+        d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
+        r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
+        n_oh = convert_to_one_hot(n, NOTE_DIMS).unsqueeze(0)
+
+        c_r_oh = None
+        c_n_oh = None
+
+        res = model(d_oh, r_oh, n_oh, c.unsqueeze(0), c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+
+        # package output
+        output, dis, z_out = res
+        
+        out, r_out, n_out, _, _ = output
+        z_r, z_n, z_h, z_r_g, z_n_g = z_out
+        dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+        
+        z_r_lst.append(z_r_g.cpu().detach())
+        z_n_lst.append(z_n_g.cpu().detach())
+        
+        # generation part
+        try:
+            r_infer_lst, n_infer_lst = [], []
+            for val in value_lst:
+                d_shifted, z_r_0, z_r, z_n = rhythm_shift_reg_hierachical(d, r, n, c, c_r, c_n, target_z_value=val)
+                pm = magenta_decode_midi(clean_output(d_shifted))
+                pm.write('rhythm_temp.mid')
+
+                # get class
+                track = pypianoroll.parse('rhythm_temp.mid', beat_resolution=4).tracks
+                if len(track) < 1: continue
+                pr = track[0].pianoroll
+                _, rhythm, note, chroma, _ = get_music_attributes(pr, beat=4)
+                r_density_shifted, n_density_shifted, c_r_shifted, c_n_shifted = get_classes(rhythm, note)
+                r_density_lst_new.append(r_density_shifted)
+                n_infer_lst.append(n_density_shifted)
+
+                # inferred
+                z_r_lst_infer.append(z_r[:, 0].item())
+                z_n_lst_infer.append(z_n[:, 0])
+
+            # monotonicity
+            r_density_lst = np.expand_dims(np.array(r_density_lst_new), axis=-1)
+            z_r_0_lst = np.expand_dims(value_lst, axis=-1)
+            reg = LinearRegression().fit(z_r_0_lst, r_density_lst)
+            result.append(reg.score(z_r_0_lst, r_density_lst))
+
+            for i in range(len(r_density_lst.squeeze())):
+                if r_density_lst.squeeze()[i] not in r_values_dict:
+                    r_values_dict[r_density_lst.squeeze()[i]] = []
+                r_values_dict[r_density_lst.squeeze()[i]].append(z_r_0_lst.squeeze()[i])
+            
+            # consistency, restrictiveness
+            r_out_all_lst.append(np.array(r_density_lst_new))
+            n_out_all_lst.append(np.array(n_infer_lst))
+        
+        except Exception as e:
+            print(e)
+            print(i)
+            i += 1
+            r_density_lst_new = []
+            continue
+        
+        i += 1
+        r_density_lst_new = []
     
+    # consistency
+    r_out_all_lst = np.array(r_out_all_lst) / r_std
+    n_out_all_lst = np.array(n_out_all_lst) / n_std
+    
+    consistency_score = np.average(np.std(r_out_all_lst, axis=0))
+    variance_score = np.average(np.std(r_out_all_lst, axis=-1))
+    restrictiveness_score = np.average(np.std(n_out_all_lst, axis=-1))
+    monotonicity_score = sum(result) / len(result)
+
+    # monotonicity
+    print("Generator consistency: ", consistency_score)
+    print("Generator variance: ", variance_score)
+    print("Generator restrictiveness: ", restrictiveness_score)
+    print("Generator monotonicity:", monotonicity_score)
+
+    plt.figure(figsize=(8,8))
+    x, y = [], []
+    for key in r_values_dict:
+        values = r_values_dict[key]
+        for val in values:
+            x.append(key)
+            y.append(val)
+
+    ax = plt.axes()
+    ax.scatter(x, y)
+    plt.savefig("rhythm_eval_plot.png")
+    plt.close()
+
+
 def rhythm_generation_evaluation_cvae(ds):
     # run generation, calculate linear regression score
     value_lst = [k / 8 for k in range(1, 9)]
@@ -811,6 +1153,36 @@ def note_shift_reg(d, r, n, c, c_r, c_n, target_z_value):
     return out, z_n_0
 
 
+def note_shift_reg_hierachical(d, r, n, c, c_r, c_n, target_z_value):
+    d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
+    r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
+    n_oh = convert_to_one_hot(n, NOTE_DIMS).unsqueeze(0)
+    c = c.unsqueeze(0)
+
+    c_r_oh = torch.zeros(3,).cuda().unsqueeze(0)
+    c_r_oh[:,c_r] = 1
+    c_n_oh = torch.zeros(3,).cuda().unsqueeze(0)
+    c_n_oh[:,c_n] = 1
+
+    res = model(d_oh, r_oh, n_oh, c, c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+    output, dis, z_out = res
+
+    # get original latent variables
+    dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+    z_r = repar(dis_r_g.mean, dis_r_g.stddev)
+    z_n = repar(dis_n_g.mean, dis_n_g.stddev)
+    
+    z_n_0 = z_n[:, 0].item()
+    
+    # shifting
+    z_n[:, 0] = target_z_value
+    model.eval()
+    z = torch.cat([z_r, z_n, c], dim=1)  
+    
+    out = model.global_decoder(z, steps=100)
+    return out, z_n_0, z_r, z_n
+
+
 def note_shift_reg_note(d, r, n, c, c_r, c_n, target_z_value):
     d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
     r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
@@ -844,7 +1216,7 @@ def note_shift_reg_note(d, r, n, c, c_r, c_n, target_z_value):
     return out, z_n_0
 
 
-def note_generation_evaluation(ds, n_min, n_max, is_mse=False):
+def note_generation_evaluation(ds, n_min, n_max, r_std, n_std, is_mse=False):
     # run generation, calculate linear regression score\
     gap = (n_max - n_min) / 8
     value_lst = np.array([n_min + k * gap for k in range(8)])
@@ -955,17 +1327,19 @@ def note_generation_evaluation(ds, n_min, n_max, is_mse=False):
         n_density_lst_new = []
     
     # consistency
-    r_out_all_lst = np.array(r_out_all_lst)
-    n_out_all_lst = np.array(n_out_all_lst)
+    r_out_all_lst = np.array(r_out_all_lst) / r_std     # shape: (#samples, #values)
+    n_out_all_lst = np.array(n_out_all_lst) / n_std
     
     consistency_score = np.average(np.std(n_out_all_lst, axis=0))
+    variance_score = np.average(np.std(n_out_all_lst, axis=-1))
     restrictiveness_score = np.average(np.std(r_out_all_lst, axis=-1))
     monotonicity_score = sum(result) / len(result)
 
     # monotonicity
-    print("Average consistency: ", consistency_score)
-    print("Average restrictiveness: ", restrictiveness_score)
-    print("Average monotonicity:", sum(result) / len(result))
+    print("Generator consistency: ", consistency_score)
+    print("Generator variance: ", variance_score)
+    print("Generator restrictiveness: ", restrictiveness_score)
+    print("Generator monotonicity:", sum(result) / len(result))
 
     plt.figure(figsize=(8,8))
     x, y = [], []
@@ -979,6 +1353,131 @@ def note_generation_evaluation(ds, n_min, n_max, is_mse=False):
     ax.scatter(x, y)
     plt.savefig("note_eval_plot.png")
     plt.close()
+
+
+def note_generation_evaluation_hierachical(ds, n_min, n_max, r_std, n_std, is_mse=False):
+    # run generation, calculate linear regression score
+    gap = (n_max - n_min) / 8
+    value_lst = np.array([n_min + k * gap for k in range(8)])
+    print(n_min, n_max)
+    print(value_lst)
+    n_density_lst_new = []
+    result = []
+    ds = test_ds_dist
+    n_values_dict = {}
+
+    r_out_all_lst = []
+    n_out_all_lst = []
+
+    i = 0
+
+    while len(result) < 100:
+        r_density_lst = []
+        n_density_lst = []
+        z_r_lst = []
+        z_n_lst = []
+        z_r_lst_infer = []
+        z_n_lst_infer = []
+
+        print(len(result), end="\r")
+        d, r, n, c, c_r, c_n, r_density, n_density = ds[i]
+        d, r, n, c = torch.from_numpy(d).cuda().long(), torch.from_numpy(r).cuda().long(), \
+                    torch.from_numpy(n).cuda().long(), torch.from_numpy(c).cuda().float()
+
+        r_density_lst.append(r_density)
+        n_density_lst.append(n_density)
+
+        d_oh = convert_to_one_hot(d, EVENT_DIMS).unsqueeze(0)
+        r_oh = convert_to_one_hot(r, RHYTHM_DIMS).unsqueeze(0)
+        n_oh = convert_to_one_hot(n, NOTE_DIMS).unsqueeze(0)
+
+        c_r_oh = None
+        c_n_oh = None
+
+        res = model(d_oh, r_oh, n_oh, c.unsqueeze(0), c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+
+        # package output
+        output, dis, z_out = res
+        
+        out, r_out, n_out, _, _ = output
+        z_r, z_n, z_h, z_r_g, z_n_g = z_out
+        dis_r, dis_n, dis_h, dis_r_g, dis_n_g = dis
+        
+        z_r_lst.append(z_r_g.cpu().detach())
+        z_n_lst.append(z_n_g.cpu().detach())
+
+        try:
+            r_infer_lst, n_infer_lst = [], []
+            for val in value_lst:
+                d_shifted, z_n_0, z_r, z_n = note_shift_reg_hierachical(d, r, n, c, c_r, c_n, target_z_value=val)
+                pm = magenta_decode_midi(clean_output(d_shifted))
+                pm.write('note_temp.mid')
+
+                # get class
+                track = pypianoroll.parse('note_temp.mid', beat_resolution=4).tracks
+                if len(track) < 1: continue
+                pr = track[0].pianoroll
+                _, rhythm, note, chroma, _ = get_music_attributes(pr, beat=4)
+                r_density_shifted, n_density_shifted, c_r_shifted, c_n_shifted = get_classes(rhythm, note)
+                n_density_lst_new.append(n_density_shifted)
+                r_infer_lst.append(r_density_shifted)
+
+                # inferred
+                z_n_lst_infer.append(z_n[:, 0].item())
+
+            # consistency, restrictiveness
+            r_out_all_lst.append(np.array(r_infer_lst))
+            n_out_all_lst.append(np.array(n_density_lst_new))
+
+            # monotonicity
+            n_density_lst = np.expand_dims(np.array(n_density_lst_new), axis=-1)
+            z_n_0_lst = np.expand_dims(value_lst, axis=-1)
+            reg = LinearRegression().fit(z_n_0_lst, n_density_lst)
+            result.append(reg.score(z_n_0_lst, n_density_lst))
+
+            for i in range(len(n_density_lst.squeeze())):
+                if n_density_lst.squeeze()[i] not in n_values_dict:
+                    n_values_dict[n_density_lst.squeeze()[i]] = []
+                n_values_dict[n_density_lst.squeeze()[i]].append(z_n_0_lst.squeeze()[i])
+        
+        except Exception as e:
+            print(e)
+            print(i)
+            i += 1
+            n_density_lst_new = []
+            continue
+        
+        i += 1
+        n_density_lst_new = []
+    
+    # consistency
+    r_out_all_lst = np.array(r_out_all_lst) / r_std     # shape: (#samples, #values)
+    n_out_all_lst = np.array(n_out_all_lst) / n_std
+    
+    consistency_score = np.average(np.std(n_out_all_lst, axis=0))
+    variance_score = np.average(np.std(n_out_all_lst, axis=-1))
+    restrictiveness_score = np.average(np.std(r_out_all_lst, axis=-1))
+    monotonicity_score = sum(result) / len(result)
+
+    # monotonicity
+    print("Generator consistency: ", consistency_score)
+    print("Generator variance: ", variance_score)
+    print("Generator restrictiveness: ", restrictiveness_score)
+    print("Generator monotonicity:", sum(result) / len(result))
+
+    plt.figure(figsize=(8,8))
+    x, y = [], []
+    for key in n_values_dict:
+        values = n_values_dict[key]
+        for val in values:
+            x.append(key)
+            y.append(val)
+
+    ax = plt.axes()
+    ax.scatter(x, y)
+    plt.savefig("note_eval_plot.png")
+    plt.close()
+
 
 
 def note_generation_evaluation_v3(ds, n_min, n_max, is_mse=False):
@@ -1225,31 +1724,29 @@ if __name__ == "__main__":
     CHROMA_DIMS = 24
 
     is_adversarial = False
-    if is_adversarial:
-        # save_path = "params/music_attr_vae_reg_adv_l5.pt"
-        save_path = "abc"
-        model = MusicAttrRegAdvVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-                            tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
-                            hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
-                            n_step=args['time_step'])
-    else:
-        save_path = "params/music_attr_vae_reg_110220.pt"
-        # save_path = "abc"
-        model = MusicAttrRegVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-                            tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
-                            hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
-                            n_step=args['time_step'])
-        
-        # model = MusicGenericAttrRegVAE(roll_dims=EVENT_DIMS,
-        #                 attr_dims_lst=[RHYTHM_DIMS, NOTE_DIMS, CHROMA_DIMS],
-        #                 hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
-        #                 n_step=args['time_step'])
 
-        # model = MusicAttrCVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-        #                     tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
-        #                     hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
-        #                     n_step=args['time_step'])
-        
+    # save_path = "params/music_attr_vae_reg_110220.pt"
+    save_path = "params/music_attr_vae_reg_hierachical_vgm_ss.pt"
+    # model = MusicAttrRegVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
+    #                     tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+    #                     hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
+    #                     n_step=args['time_step'])
+    
+    model = MusicAttrRegHVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
+                        tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+                        hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
+                        n_step=args['time_step'])
+    
+    # model = MusicGenericAttrRegVAE(roll_dims=EVENT_DIMS,
+    #                 attr_dims_lst=[RHYTHM_DIMS, NOTE_DIMS, CHROMA_DIMS],
+    #                 hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
+    #                 n_step=args['time_step'])
+
+    # model = MusicAttrCVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
+    #                     tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+    #                     hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
+    #                     n_step=args['time_step'])
+    
 
     if os.path.exists(save_path):
         print("Loading {}".format(save_path))
@@ -1285,6 +1782,21 @@ if __name__ == "__main__":
     dl = test_dl_dist
     print(len(train_ds_dist), len(val_ds_dist), len(test_ds_dist))
 
+    # vgmidi dataloaders
+    print("Loading VGMIDI...")
+    data_lst, rhythm_lst, note_density_lst, arousal_lst, valence_lst, chroma_lst = get_vgmidi()
+    vgm_train_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+                                    chroma_lst, arousal_lst, valence_lst, mode="train")
+    vgm_train_dl_dist = DataLoader(vgm_train_ds_dist, batch_size=32, shuffle=False, num_workers=0)
+    vgm_val_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+                                    chroma_lst, arousal_lst, valence_lst, mode="val")
+    vgm_val_dl_dist = DataLoader(vgm_val_ds_dist, batch_size=32, shuffle=False, num_workers=0)
+    vgm_test_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+                                    chroma_lst, arousal_lst, valence_lst, mode="test")
+    vgm_test_dl_dist = DataLoader(vgm_test_ds_dist, batch_size=32, shuffle=False, num_workers=0)
+    print(len(vgm_train_ds_dist), len(vgm_val_ds_dist), len(vgm_test_ds_dist))
+    print()
+
 
     is_class = args["is_class"]
     is_res = args["is_res"]
@@ -1315,17 +1827,24 @@ if __name__ == "__main__":
     
     # ================= Normal implementation =================== #
     # print("Train")
-    # train_test_evaluation(train_dl_dist)
-    print("Test")
-    r_min, r_max, n_min, n_max = train_test_evaluation(test_dl_dist)
-    print("Rhythm Generation")
-    # rhythm_generation_evaluation_cvae(test_ds_dist)
-    rhythm_generation_evaluation(test_ds_dist, r_min, r_max, is_mse=False)
-
-    # print("Train")
-    # train_test_evaluation_note(train_dl_dist)
+    # _, _, _, _, r_std, n_std = train_test_evaluation(train_dl_dist)
     # print("Test")
-    # train_test_evaluation_note(test_dl_dist)
+    # r_min, r_max, n_min, n_max, _, _ = train_test_evaluation(test_dl_dist)
+    # print("Rhythm Generation")
+    # rhythm_generation_evaluation(test_ds_dist, r_min, r_max, r_std, n_std, is_mse=False)
+    # print("Note Generation")
+    # note_generation_evaluation(test_ds_dist, n_min, n_max, r_std, n_std, is_mse=False)
+
+    # ================= Hierachical implementation =================== #
+    print("Train")
+    _, _, _, _, r_std, n_std = train_test_evaluation(train_dl_dist, is_hierachical=True)
+    print("Test")
+    r_min, r_max, n_min, n_max, _, _ = train_test_evaluation(test_dl_dist, is_hierachical=True)
+    # print("VGMIDI Train")
+    # train_test_evaluation(vgm_train_dl_dist, is_hierachical=True, is_vgmidi=True)
+    # print("VGMIDI Test")
+    # train_test_evaluation(vgm_test_dl_dist, is_hierachical=True, is_vgmidi=True)
+    print("Rhythm Generation")
+    rhythm_generation_evaluation_hierachical(test_ds_dist, r_min, r_max, r_std, n_std, is_mse=False)
     print("Note Generation")
-    # note_generation_evaluation_cvae(test_ds_dist)
-    note_generation_evaluation(test_ds_dist, n_min, n_max, is_mse=False)
+    note_generation_evaluation_hierachical(test_ds_dist, n_min, n_max, r_std, n_std, is_mse=False)
