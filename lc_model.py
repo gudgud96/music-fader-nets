@@ -36,24 +36,34 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         self.linear = nn.Linear(latent_dim + preset_dim, latent_dim)
         self.linear2 = nn.Linear(latent_dim, latent_dim)
+        self.linear3 = nn.Linear(latent_dim, latent_dim)
+        self.gate_linear = nn.Linear(latent_dim, latent_dim)
         self.bn1 = nn.BatchNorm1d(latent_dim)
         self.bn2 = nn.BatchNorm1d(latent_dim)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+        self.bn3 = nn.BatchNorm1d(latent_dim)
+        self.bn4 = nn.BatchNorm1d(latent_dim)
+        self.lrelu1 = nn.LeakyReLU(0.2, inplace=True)
+        self.lrelu2 = nn.LeakyReLU(0.2, inplace=True)
         self.dropout = nn.Dropout(0.2)
+        self.label_emb = nn.Embedding(preset_dim, preset_dim)
 
     def forward(self, z, labels):
         # Concatenate label embedding and image to produce input
-        z_input = torch.cat([z, labels], dim=-1)
-        z_gen = self.dropout(self.bn1(self.lrelu(self.linear(z_input))))
-        z_gen = self.dropout(self.bn2(self.linear2(z_gen)))
+        label_embed = self.label_emb(labels.long()).squeeze()
+        if len(label_embed.shape) < 2: label_embed = label_embed.unsqueeze(0)
+        z_input = torch.cat([z, label_embed], dim=-1)
+        z_hid = self.dropout(self.bn1(self.lrelu1(self.linear(z_input))))
+        z_hid = self.dropout(self.bn2(self.lrelu2(self.linear2(z_hid))))
+        z_gen = self.dropout(self.bn3(self.linear3(z_hid)))
+        gate = self.dropout(self.bn4(self.gate_linear(z_hid)))
 
-        gate = nn.Sigmoid()(z_gen)
+        gate = nn.Sigmoid()(gate)
         z_out = gate * z_gen + (1-gate) * z
         return z_out
 
 
 class Discriminator(nn.Module):
-    def __init__(self, latent_dim, preset_dim=2):
+    def __init__(self, latent_dim, preset_dim=0):
         super(Discriminator, self).__init__()
         self.linear = nn.Linear(latent_dim + preset_dim, 32)
         self.linear2 = nn.Linear(32, 1)
@@ -61,13 +71,22 @@ class Discriminator(nn.Module):
         self.dropout = nn.Dropout(0.2)
         self.bn = nn.BatchNorm1d(32)
 
-    def forward(self, z, labels):
+    def forward(self, z):
         # Concatenate label embedding and image to produce input
-        z_input = torch.cat([z, labels], dim=-1)
-        validity = self.dropout(self.lrelu(self.bn(self.linear(z_input))))
+        validity = self.dropout(self.lrelu(self.bn(self.linear(z))))
         validity = nn.Sigmoid()(self.linear2(validity))
         
         return validity
+
+
+def convert_to_one_hot(input, dims):
+    if len(input.shape) > 1:
+        input_oh = torch.zeros((input.shape[0], input.shape[1], dims)).cuda()
+        input_oh = input_oh.scatter_(-1, input.unsqueeze(-1), 1.)
+    else:
+        input_oh = torch.zeros((input.shape[0], dims)).cuda()
+        input_oh = input_oh.scatter_(-1, input.unsqueeze(-1), 1.)
+    return input_oh
 
 
 if __name__ == "__main__":
@@ -119,7 +138,7 @@ if __name__ == "__main__":
                             hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
                             n_step=args['time_step'])
 
-    model.load_state_dict(torch.load("params/music_attr_vae_reg_vgm.pt"))
+    model.load_state_dict(torch.load("params/music_attr_vae_reg_110220.pt"))
     # freeze model
     for p in model.parameters():
         p.requires_grad = False
@@ -127,7 +146,17 @@ if __name__ == "__main__":
 
     # ===================== TRAINING MODEL ==================== #
     # Loss functions
-    adversarial_loss = torch.nn.BCELoss()
+    def w_binary_cross_entropy(output, target, weights=None):
+        if weights is not None:
+            assert len(weights) == 2
+            loss = weights[1] * (target * torch.log(output)) + \
+                weights[0] * ((1 - target) * torch.log(1 - output))
+        else:
+            loss = target * torch.log(output) + (1 - target) * torch.log(1 - output)
+        return torch.neg(torch.mean(loss))
+    
+    w = torch.Tensor([1/0.3, 1/0.7])
+    adversarial_loss = w_binary_cross_entropy
 
     # Initialize generator and discriminator
     generator_r = Generator(latent_dim=args["z_dim"])
@@ -141,7 +170,7 @@ if __name__ == "__main__":
         generator_n.cuda()
         discriminator_r.cuda()
         discriminator_n.cuda()
-        adversarial_loss.cuda()
+        # adversarial_loss.cuda()
 
     # Optimizers
     optimizer_Gr = torch.optim.Adam(generator_r.parameters(), lr=args["lr"])
@@ -156,17 +185,7 @@ if __name__ == "__main__":
     #  Training
     # ----------
 
-    def convert_to_one_hot(input, dims):
-        if len(input.shape) > 1:
-            input_oh = torch.zeros((input.shape[0], input.shape[1], dims)).cuda()
-            input_oh = input_oh.scatter_(-1, input.unsqueeze(-1), 1.)
-        else:
-            input_oh = torch.zeros((input.shape[0], dims)).cuda()
-            input_oh = input_oh.scatter_(-1, input.unsqueeze(-1), 1.)
-        return input_oh
-
-
-    def pass_model(x):
+    def pass_model(x, is_a=True):
         d, r, n, c, a, v, r_density, n_density = x
         d, r, n, c = d.cuda().long(), r.cuda().long(), \
                         n.cuda().long(), c.cuda().float()
@@ -176,9 +195,13 @@ if __name__ == "__main__":
         dis_r, dis_n = model.encoder(d_oh, None, None, c)
         z_r, z_n = dis_r.sample(), dis_n.sample()
 
-        a_label = torch.Tensor(np.eye(2, dtype='uint8')[a.int().cpu().detach().numpy()]).cuda()
+        if is_a:
+            # a_label = torch.Tensor(np.eye(2, dtype='uint8')[a.int().cpu().detach().numpy()]).cuda()
+            a_label = torch.Tensor(a).cuda().unsqueeze(-1)
+        else:
+            a_label = 0
 
-        return z_r, z_n, a_label
+        return z_r, z_n, a_label, dis_r, dis_n
 
 
     def sample_prior(z):
@@ -197,42 +220,20 @@ if __name__ == "__main__":
         res = np.zeros(validity.shape[0],)
         res[np.where(validity.cpu().detach().numpy().squeeze() > 0.5)] = 1
         return res
+    
+
+    def distance_reg_loss(dis_var, z_gen, z):
+        mean_var = torch.mean(dis_var, dim=0)
+        return torch.mean(torch.log(1 + F.mse_loss(z_gen, z, size_average=False, reduce=False)) / mean_var)
         
 
     d_loss_lst, g_loss_lst = [], []
     for epoch in range(args["n_epochs"]):
 
+        # supervised train first
         for i, x in enumerate(vgm_train_dl_dist):
             
-            z_r_q, z_n_q, a_label = pass_model(x)
-
-            # Adversarial ground truths
-            valid = Variable(FloatTensor(z_r_q.shape[0], 1).fill_(1.0), requires_grad=False)
-            fake = Variable(FloatTensor(z_r_q.shape[0], 1).fill_(0.0), requires_grad=False)
-
-            # -----------------
-            #  Train Generator
-            # -----------------
-
-            optimizer_Gr.zero_grad()
-            optimizer_Gn.zero_grad()
-
-            # Sample noise and labels as generator input
-            z_r_p, z_n_p = sample_prior(z_r_q)
-
-            # Generate a batch of images
-            z_r_p_gen, z_n_p_gen = generator_r(z_r_p, a_label), generator_n(z_n_p, a_label)
-
-            # Loss measures generator's ability to fool the discriminator
-            validity_r, validity_n = discriminator_r(z_r_p_gen, a_label), discriminator_n(z_n_p_gen, a_label)
-            validity_int_r, validity_int_n = validity_int(validity_r), validity_int(validity_n)
-            g_loss = adversarial_loss(validity_r, valid) + adversarial_loss(validity_n, valid)
-            g_acc = (accuracy_score(np.ones(valid.shape[0]), validity_int_r) + \
-                    accuracy_score(np.ones(valid.shape[0]), validity_int_n)) / 2
-
-            g_loss.backward()
-            optimizer_Gr.step()
-            optimizer_Gn.step()
+            z_r_q, z_n_q, a_label, _, _ = pass_model(x)
 
             # ---------------------
             #  Train Discriminator
@@ -242,43 +243,134 @@ if __name__ == "__main__":
             optimizer_Dn.zero_grad()
 
             # Loss for q(z|x)
-            validity_q_r, validity_q_n = discriminator_r(z_r_q, a_label), discriminator_n(z_n_q, a_label)
+            validity_q_r, validity_q_n = discriminator_r(z_r_q), discriminator_n(z_n_q)
             validity_int_qr, validity_int_qn = validity_int(validity_q_r), validity_int(validity_q_n)
-            d_real_acc = (accuracy_score(np.ones(valid.shape[0]), validity_int_qr) + \
-                            accuracy_score(np.ones(valid.shape[0]), validity_int_qn)) / 2
-            d_real_loss = adversarial_loss(validity_q_r, valid) + adversarial_loss(validity_q_n, valid)
-
-            # Loss for p(z)
-            validity_p_r, validity_p_n = discriminator_r(z_r_p, a_label), discriminator_n(z_n_p, a_label)
-            validity_int_pr, validity_int_pn = validity_int(validity_p_r), validity_int(validity_p_n)
-            d_fake_acc = (accuracy_score(np.zeros(valid.shape[0]), validity_int_pr) + \
-                            accuracy_score(np.zeros(valid.shape[0]), validity_int_pn)) / 2
-            d_fake_loss = adversarial_loss(validity_p_r, fake) + adversarial_loss(validity_p_n, fake)
-
-            # Loss for G(p(z), y)
-            validity_g_r, validity_g_n = discriminator_r(z_r_p_gen, a_label), discriminator_n(z_n_p_gen, a_label)
-            validity_int_gr, validity_int_gn = validity_int(validity_g_r), validity_int(validity_g_n)
-            d_gen_acc = (accuracy_score(np.zeros(valid.shape[0]), validity_int_gr) + \
-                            accuracy_score(np.zeros(valid.shape[0]), validity_int_gn)) / 2
-            d_gen_loss = adversarial_loss(validity_g_r.detach(), fake) + adversarial_loss(validity_g_n.detach(), fake)
+            d_real_acc = (accuracy_score(a_label.cpu().detach().numpy().squeeze(), validity_int_qr) + \
+                            accuracy_score(a_label.cpu().detach().numpy().squeeze(), validity_int_qn)) / 2
+            d_real_loss = adversarial_loss(validity_q_r, a_label, weights=w) + adversarial_loss(validity_q_n, a_label, weights=w)
             
             # Total discriminator loss
-            d_loss = (d_real_loss + d_fake_loss + d_gen_loss) / 3
-            d_acc = (d_real_acc + d_fake_acc + d_gen_acc) / 3
+            d_loss = d_real_loss
+            d_acc = d_real_acc
 
-            d_loss.backward(retain_graph=True)
+            d_loss.backward()
             optimizer_Dr.step()
             optimizer_Dn.step()
 
             print(
-                "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] [D acc: %f] [G acc: %f]"
-                % (epoch, args["n_epochs"], i, len(vgm_train_dl_dist), d_loss.item(), g_loss.item(), d_acc, g_acc)
+                "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [D acc: %f]"
+                % (epoch, args["n_epochs"], i, len(vgm_train_dl_dist), d_loss.item(), d_acc)
             )
 
             d_loss_lst.append(d_loss.item())
-            g_loss_lst.append(g_loss.item())
+        
+        print()
+        # supervised train first
+        for i, x in enumerate(vgm_test_dl_dist):
+            
+            z_r_q, z_n_q, a_label, _, _ = pass_model(x)
 
+            # ---------------------
+            #  Evaluate Discriminator
+            # ---------------------
+
+            # Loss for q(z|x)
+            validity_q_r, validity_q_n = discriminator_r(z_r_q), discriminator_n(z_n_q)
+            validity_int_qr, validity_int_qn = validity_int(validity_q_r), validity_int(validity_q_n)
+            d_real_acc = (accuracy_score(a_label.cpu().detach().numpy().squeeze(), validity_int_qr) + \
+                            accuracy_score(a_label.cpu().detach().numpy().squeeze(), validity_int_qn)) / 2
+            d_real_loss = adversarial_loss(validity_q_r, a_label, weights=w) + adversarial_loss(validity_q_n, a_label, weights=w)
+            
+            # Total discriminator loss
+            d_loss = d_real_loss
+            d_acc = d_real_acc
+
+            print(
+                "[Epoch %d/%d] [Batch %d/%d] [DT loss: %f] [DT acc: %f]"
+                % (epoch, args["n_epochs"], i, len(vgm_train_dl_dist), d_loss.item(), d_acc)
+            )
+
+            d_loss_lst.append(d_loss.item())
+
+        print()
+        
+        # unsupervised train
+        for i, x in enumerate(train_dl_dist):
+
+            z_r_q, z_n_q, _, dis_r, dis_n = pass_model(x, is_a=False)
+
+            # Adversarial ground truths
+            valid = Variable(FloatTensor(z_r_q.shape[0], 1).fill_(0.0), requires_grad=False)
+
+            # -----------------
+            #  Train Generator
+            # -----------------
+            optimizer_Gr.zero_grad()
+            optimizer_Gn.zero_grad()
+
+            # Generate a batch of images
+            z_r_q_gen, z_n_q_gen = generator_r(z_r_q, valid), generator_n(z_n_q, valid)
+
+            # Critic loss measures generator's ability to generate exact
+            validity_r, validity_n = discriminator_r(z_r_q_gen), discriminator_n(z_n_q_gen)
+            validity_int_r, validity_int_n = validity_int(validity_r), validity_int(validity_n)
+
+            g_loss = adversarial_loss(validity_r, valid, weights=w) + adversarial_loss(validity_n, valid, weights=w)
+            g_loss += 0.5 * (distance_reg_loss(dis_r.variance, z_r_q_gen, z_r_q) + \
+                      distance_reg_loss(dis_n.variance, z_n_q_gen, z_n_q))
+            g_acc = (accuracy_score(valid.cpu().detach().numpy().squeeze(), validity_int_r) + \
+                    accuracy_score(valid.cpu().detach().numpy().squeeze(), validity_int_n)) / 2
+            
+            g_loss.backward()
+            optimizer_Gr.step()
+            optimizer_Gn.step()
+
+            print(
+                "[Epoch %d/%d] [Batch %d/%d] [G loss: %f] [G acc: %f]"
+                % (epoch, args["n_epochs"], i, len(train_dl_dist), g_loss.item(), g_acc)
+            )
+            g_loss_lst.append(g_loss.item())
+        
+        print()
+
+        # unsupervised train
+        for i, x in enumerate(train_dl_dist):
+
+            z_r_q, z_n_q, _, dis_r, dis_n = pass_model(x, is_a=False)
+
+            # Adversarial ground truths
+            fake = Variable(FloatTensor(z_r_q.shape[0], 1).fill_(0.0), requires_grad=False)
+
+            # -----------------
+            #  Train Generator
+            # -----------------
+            optimizer_Gr.zero_grad()
+            optimizer_Gn.zero_grad()
+
+            # Generate a batch of images
+            z_r_q_gen, z_n_q_gen = generator_r(z_r_q, fake), generator_n(z_n_q, fake)
+
+            # Critic loss measures generator's ability to generate exact
+            validity_r, validity_n = discriminator_r(z_r_q_gen), discriminator_n(z_n_q_gen)
+            validity_int_r, validity_int_n = validity_int(validity_r), validity_int(validity_n)
+            
+            g_loss = adversarial_loss(validity_r, fake, weights=w) + adversarial_loss(validity_n, fake, weights=w)
+            g_loss += 0.5 * (distance_reg_loss(dis_r.variance, z_r_q_gen, z_r_q) + \
+                      distance_reg_loss(dis_n.variance, z_n_q_gen, z_n_q))
+            g_acc = (accuracy_score(fake.cpu().detach().numpy().squeeze(), validity_int_r) + \
+                    accuracy_score(fake.cpu().detach().numpy().squeeze(), validity_int_n)) / 2
+
+            g_loss.backward()
+            optimizer_Gr.step()
+            optimizer_Gn.step()
+
+            print(
+                "[Epoch %d/%d] [Batch %d/%d] [GT loss: %f] [GT acc: %f]"
+                % (epoch, args["n_epochs"], i, len(train_dl_dist), g_loss.item(), g_acc)
+            )
+            g_loss_lst.append(g_loss.item())
             batches_done = epoch * len(vgm_train_dl_dist) + i
+
 
 
     plt.plot(d_loss_lst)

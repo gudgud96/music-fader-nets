@@ -1,6 +1,6 @@
 {
     "batch_size": 128,
-    "n_epochs": 200,
+    "n_epochs": 5,
     "lr": 1e-3,
     "decay": 0.9999,
     "if_parallel": false,

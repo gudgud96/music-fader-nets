@@ -704,7 +704,7 @@ def evaluation_phase():
             # package output
             output, dis, z_out = res
             out, r_out, n_out, _, _ = output
-            z_r, z_n, z_h, z_r_g, z_n_g = z_out
+            z_r, z_n = z_out
 
             # calculate loss
             loss, CE_X, CE_R, CE_N = loss_function(out, d,
@@ -809,11 +809,11 @@ def evaluation_phase():
     dl = DataLoader(test_ds_dist, batch_size=128, shuffle=False, num_workers=0)
     run(dl)
     dl = DataLoader(vgm_train_ds_dist, batch_size=32, shuffle=False, num_workers=0)
-    run(dl, is_vgmidi=True)
+    run(dl)
     dl = DataLoader(vgm_test_ds_dist, batch_size=32, shuffle=False, num_workers=0)
-    run(dl, is_vgmidi=True)
+    run(dl)
 
 
-training_phase(step)
+# training_phase(step)
 evaluation_phase()
 
