@@ -1725,7 +1725,7 @@ if __name__ == "__main__":
 
     is_adversarial = False
 
-    save_path = "params/music_attr_vae_reg_110220.pt"
+    save_path = "params/music_attr_vae_reg_glsr.pt"
     # save_path = "params/music_attr_vae_reg_hierachical_vgm_ss.pt"
     model = MusicAttrRegVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
                         tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,

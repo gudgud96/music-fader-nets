@@ -5,7 +5,7 @@
     "lr": 1e-3,
     "decay": 0.9999,
     "if_parallel": false,
-    "name": "music_attr_vae_reg_vgm",
+    "name": "music_attr_fader",
     "hidden_dim": 512,
     "z_dim": 128,
     "beta": 0.1,

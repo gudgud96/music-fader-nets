@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 import music21
 
 import magenta
+print(magenta.__file__)
 from magenta.models.score2perf.music_encoders import MidiPerformanceEncoder
 
 from calculate_tension import calculate_diameter, extract_notes
@@ -53,8 +54,9 @@ def magenta_decode_midi(notes, is_eos=False):
             min_pitch=MIN_PITCH,
             max_pitch=MAX_PITCH,
             add_eos=is_eos)
-    midi_sample = mpe.decode(notes)
-    pm = pretty_midi.PrettyMIDI(midi_sample)
+    # midi_sample = mpe.decode(notes)
+    # pm = pretty_midi.PrettyMIDI(midi_sample)
+    pm = mpe.decode(notes, return_pm=True)
     return pm
 
 
@@ -778,14 +780,14 @@ def get_classic_piano_v4_long():
 
 
 def get_vgmidi():
-    data_lst = np.load("filtered_songs/song_tokens.npy", allow_pickle=True)
-    rhythm_lst = np.load("filtered_songs/rhythm_lst.npy", allow_pickle=True)
-    note_density_lst = np.load("filtered_songs/note_lst.npy", allow_pickle=True)
-    valence_lst = np.load("filtered_songs/valence_lst.npy")
-    arousal_lst = np.load("filtered_songs/arousal_lst.npy")
+    data_lst = np.load("filtered_songs_disambiguate/song_tokens.npy", allow_pickle=True)
+    rhythm_lst = np.load("filtered_songs_disambiguate/rhythm_lst.npy", allow_pickle=True)
+    note_density_lst = np.load("filtered_songs_disambiguate/note_lst.npy", allow_pickle=True)
+    valence_lst = np.load("filtered_songs_disambiguate/valence_lst.npy")
+    arousal_lst = np.load("filtered_songs_disambiguate/arousal_lst.npy")
 
-    if os.path.exists("filtered_songs/chroma_lst.npy"):
-        chroma_lst = np.load("filtered_songs/chroma_lst.npy")
+    if os.path.exists("filtered_songs_disambiguate/chroma_lst.npy"):
+        chroma_lst = np.load("filtered_songs_disambiguate/chroma_lst.npy")
     else:
         chroma_lst = []
         for _, token in tqdm(enumerate(data_lst), total=len(data_lst)):
@@ -794,7 +796,7 @@ def get_vgmidi():
             chroma = get_harmony_vector("vgmidi_tmp.mid", is_one_hot=True)
             chroma_lst.append(chroma)
         chroma_lst = np.array(chroma_lst)
-        np.save("filtered_songs/chroma_lst.npy", chroma_lst)
+        np.save("filtered_songs_disambiguate/chroma_lst.npy", chroma_lst)
     
     return data_lst, rhythm_lst, note_density_lst, arousal_lst, valence_lst, chroma_lst
 
@@ -932,13 +934,16 @@ class MusicAttrDataset3(Dataset):
         self.data, self.rhythm, self.note, self.chroma, self.arousal, self.valence = indexed
         self.data = [torch.Tensor(np.insert(k, -1, 1)) for k in self.data]
         self.data = torch.nn.utils.rnn.pad_sequence(self.data, batch_first=True)
-        self.rhythm = [torch.Tensor(k) for k in self.rhythm]
-        self.rhythm = torch.nn.utils.rnn.pad_sequence(self.rhythm, batch_first=True)
-        self.note = [torch.Tensor(k) for k in self.note]
-        self.note = torch.nn.utils.rnn.pad_sequence(self.note, batch_first=True)
 
-        self.r_density = [Counter(k)[1] / len(k) for k in self.rhythm]
+        # put this before applying torch.Tensor
+        self.r_density = [Counter(list(k))[1] / len(k) for k in self.rhythm]
         self.n_density = np.array([sum(k) / len(k) for k in self.note])
+
+        self.rhythm = [torch.Tensor(k) for k in self.rhythm]
+        self.note = [torch.Tensor(k) for k in self.note]
+        
+        self.rhythm = torch.nn.utils.rnn.pad_sequence(self.rhythm, batch_first=True)
+        self.note = torch.nn.utils.rnn.pad_sequence(self.note, batch_first=True)
 
         self.arousal[self.arousal >= 0] = 1
         self.arousal[self.arousal < 0] = 0
