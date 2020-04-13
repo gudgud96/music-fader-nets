@@ -46,7 +46,7 @@ model = MusicAttrRegGMVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_di
                         tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
                         hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
                         n_step=args['time_step'],
-                        n_component=2)      # 2 clusters at the moment
+                        n_component=args['num_clusters'])
 
 if os.path.exists(save_path):
     print("Loading {}".format(save_path))
@@ -159,8 +159,6 @@ def loss_function(out, d,
     if not is_supervised:
         # KL latent loss
         n_component = qy_x_r.shape[-1]
-
-        # using torch.sum implementation
         
         for k in torch.arange(0, n_component):       # number of components
             # infer current p(z|y)

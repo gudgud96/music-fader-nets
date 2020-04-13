@@ -947,6 +947,19 @@ class MusicAttrDataset3(Dataset):
 
         self.arousal[self.arousal >= 0] = 1
         self.arousal[self.arousal < 0] = 0
+
+        # self.labels = []
+        # for i in range(len(self.arousal)):
+        #     if self.arousal[i] >= 0 and self.valence[i] >= 0:
+        #         self.labels.append(0)
+        #     elif self.arousal[i] >= 0 and self.valence[i] < 0:
+        #         self.labels.append(1)
+        #     elif self.arousal[i] < 0 and self.valence[i] < 0:
+        #         self.labels.append(2)
+        #     else:
+        #         self.labels.append(3)
+        # print("Emotion labels:", Counter(self.labels))
+        # self.labels = np.array(self.labels)
            
     def __len__(self):
         return len(self.data)
@@ -957,6 +970,7 @@ class MusicAttrDataset3(Dataset):
         n = self.note[idx]
         c = self.chroma[idx]
         a = self.arousal[idx]
+        # a = self.labels[idx]
         v  =self.valence[idx]
         
         r_density = self.r_density[idx]

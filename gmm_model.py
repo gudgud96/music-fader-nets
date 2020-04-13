@@ -73,7 +73,7 @@ class MusicAttrRegGMVAE(nn.Module):
 
         # build latent mean and variance lookup
         self._build_mu_lookup()
-        self._build_logvar_lookup(pow_exp=-3)       # a hyperparameter to set
+        self._build_logvar_lookup(pow_exp=-2)       # a hyperparameter to set
     
     def _sampling(self, x):
         idx = x.max(1)[1]
@@ -306,7 +306,7 @@ class MusicAttrSingleGMVAE(nn.Module):
 
         # build latent mean and variance lookup
         self._build_mu_lookup()
-        self._build_logvar_lookup(pow_exp=-2)       # a hyperparameter to set
+        self._build_logvar_lookup(pow_exp=-1)       # a hyperparameter to set
     
     def _sampling(self, x):
         idx = x.max(1)[1]
@@ -432,7 +432,7 @@ class MusicAttrSingleGMVAE(nn.Module):
         z = repar(dis.mean, dis.stddev)
 
         # infer gaussian component
-        logLogit_qy_x, qy_x = self.approx_qy_x(z, self.mu_r_lookup, self.logvar_r_lookup, n_component=self.n_component)
+        logLogit_qy_x, qy_x = self.approx_qy_x(z, self.mu_lookup, self.logvar_lookup, n_component=self.n_component)
         _, y = torch.max(qy_x, dim=1)
 
          # ========================== GENERATION ====================== #
