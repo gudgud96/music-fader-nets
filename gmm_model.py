@@ -16,8 +16,6 @@ class MusicAttrRegGMVAE(nn.Module):
                  roll_dims,
                  rhythm_dims,
                  note_dims,
-                 tempo_dims,
-                 velocity_dims,
                  chroma_dims,
                  hidden_dims,
                  z_dims,
@@ -36,17 +34,14 @@ class MusicAttrRegGMVAE(nn.Module):
         self.gru_n = nn.GRU(roll_dims, hidden_dims, batch_first=True, bidirectional=True)
         self.gru_c = nn.GRU(roll_dims, hidden_dims, batch_first=True, bidirectional=True)
 
-        # dropouts
-        self.e_dropout = nn.Dropout(p=0.3)
+        # classifiers
+        self.c_r = nn.Linear(z_dims, 3)
+        self.c_n = nn.Linear(z_dims, 3)
 
         # sub-decoder
         self.gru_d_r = nn.GRU(z_dims + rhythm_dims, hidden_dims, batch_first=True)
         self.gru_d_n = nn.GRU(z_dims + note_dims, hidden_dims, batch_first=True)
         self.gru_d_c = nn.GRU(z_dims + chroma_dims, hidden_dims, batch_first=True)
-
-        # classifiers
-        self.c_r = nn.Linear(z_dims, 3)
-        self.c_n = nn.Linear(z_dims, 3)
         
         # mu and logvar
         self.mu_r, self.var_r = nn.Linear(hidden_dims * 2, z_dims), nn.Linear(hidden_dims * 2, z_dims)
@@ -222,8 +217,7 @@ class MusicAttrRegGMVAE(nn.Module):
         qy_x = torch.nn.functional.softmax(logLogit_qy_x, dim=1)
         return logLogit_qy_x, qy_x
 
-    def forward(self, x, rhythm, note, chroma, c_r_oh, c_n_oh,
-                is_class=False, is_res=False):
+    def forward(self, x, rhythm, note, chroma):
         
         if self.training:
             self.sample = x
@@ -268,6 +262,7 @@ class MusicAttrRegGMVAE(nn.Module):
 class MusicAttrSingleGMVAE(nn.Module):
     """
     MusicAttrVAE with a GMM as latent prior distribution, without attribute modelling.
+    Only one encoder is used to compare the usage of low-level features.
     Reference: https://github.com/yjlolo/vae-audio/blob/master/model/model.py
     """
     def __init__(self,
@@ -286,9 +281,6 @@ class MusicAttrSingleGMVAE(nn.Module):
         
         # encoder
         self.gru = nn.GRU(roll_dims, hidden_dims, batch_first=True, bidirectional=True)
-
-        # dropouts
-        self.e_dropout = nn.Dropout(p=0.3)
         
         # mu and logvar
         self.mu, self.var = nn.Linear(hidden_dims * 2, z_dims), nn.Linear(hidden_dims * 2, z_dims)

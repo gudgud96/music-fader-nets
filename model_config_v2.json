@@ -1,12 +1,11 @@
 {
     "batch_size": 128,
-    "n_epochs": 50,
+    "n_epochs": 30,
     "lr": 1e-3,
     "decay": 0.9999,
-    "name": "music_attr_vae_reg_gmm_long_v",
+    "name": "music_attr_vae_singlevae_8.pt",
     "hidden_dim": 512,
     "z_dim": 128,
     "beta": 0.2,
-    "time_step": 32,
-    "num_clusters": 2
+    "time_step": 32
 }

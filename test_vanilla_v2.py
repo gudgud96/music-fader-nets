@@ -1,6 +1,9 @@
+'''
+Controllability evaluation of Music FaderNets, vanilla VAE version.
+'''
 import json
 import torch
-from uni_model_2 import *
+from model_v2 import *
 import os
 from sklearn.model_selection import train_test_split
 from ptb_v2 import *
@@ -9,7 +12,7 @@ import numpy as np
 from IPython.display import Audio
 from tqdm import tqdm
 from polyphonic_event_based_v2 import *
-from adversarial_test_class import *
+from test_class import *
 from collections import Counter
 import random
 
@@ -24,10 +27,9 @@ def run_through(dl):
     temp_count = 0
 
     for j, x in tqdm(enumerate(dl), total=len(dl)):
-        d, r, n, c, c_r, c_n, r_density, n_density = x
+        d, r, n, c, r_density, n_density = x
         d, r, n, c = d.cuda().long(), r.cuda().long(), \
                     n.cuda().long(), c.cuda().float()
-        c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
         
         r_lst.append(r)
         n_lst.append(n)
@@ -38,23 +40,17 @@ def run_through(dl):
         r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
         n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-        c_r_oh = convert_to_one_hot(c_r, 4)
-        c_n_oh = convert_to_one_hot(c_n, 4)
-
-        res = model(d_oh, r_oh, n_oh, c, None, None)
+        res = model(d_oh, r_oh, n_oh, c)
 
         # package output
         output, dis, z_out = res
         
         z_r, z_n = z_out
         dis_r, dis_n = dis
-        out, r_out, n_out, _, _ = output
+        out, r_out, n_out = output
         
         z_r_lst.append(z_r.cpu().detach())
         z_n_lst.append(z_n.cpu().detach())
-        
-        c_r_lst.append(c_r.cpu().detach())
-        c_n_lst.append(c_n.cpu().detach())
 
         r_mean.append(dis_r.mean.cpu().detach())
         n_mean.append(dis_n.mean.cpu().detach())
@@ -66,8 +62,6 @@ def run_through(dl):
     r_lst = torch.cat(r_lst, dim=0).cpu().detach().numpy()
     n_lst = torch.cat(n_lst, dim=0).cpu().detach().numpy()
 
-    c_r_lst = torch.cat(c_r_lst, dim=0).cpu().detach().numpy()
-    c_n_lst = torch.cat(c_n_lst, dim=0).cpu().detach().numpy()
     z_r_lst = torch.cat(z_r_lst, dim=0).cpu().detach().numpy()
     z_n_lst = torch.cat(z_n_lst, dim=0).cpu().detach().numpy()
 
@@ -83,7 +77,7 @@ def run_through(dl):
     return r_density_lst, n_density_lst, \
             r_lst, n_lst, \
             r_mean, n_mean, \
-            c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+            z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
             r_min, r_max, n_min, n_max
 
 
@@ -92,7 +86,7 @@ def train_test_evaluation(dl):
     r_density_lst, n_density_lst, \
         r_lst, n_lst, \
         r_mean, n_mean, \
-        c_r_lst, c_n_lst, z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
+        z_r_0_lst, z_r_rest_lst, z_n_0_lst, z_n_rest_lst, \
         r_min, r_max, n_min, n_max = run_through(dl)
     
     z_r_lst = np.concatenate([np.expand_dims(z_r_0_lst, axis=-1), z_r_rest_lst], axis=-1)
@@ -100,20 +94,20 @@ def train_test_evaluation(dl):
     z_lst = np.concatenate([z_r_lst, z_n_lst], axis=-1)
 
     # get r and n std
-    r_std = np.std(r_lst)
-    n_std = np.std(n_lst)
+    r_std = np.std(r_density_lst.squeeze())
+    n_std = np.std(n_density_lst.squeeze())
 
     return r_min, r_max, n_min, n_max, r_std, n_std
 
 
 if __name__ == "__main__":
     # some initialization
-    with open('uni_model_config_2.json') as f:
+    with open('model_config_v2.json') as f:
         args = json.load(f)
 
-    save_path = "params/music_attr_vae_reg_110220.pt"
+    save_path = "params/music_attr_vae_reg_vanilla.pt"
     model = MusicAttrRegVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-                        tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+                        chroma_dims=CHROMA_DIMS,
                         hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
                         n_step=args['time_step'])
     
@@ -137,13 +131,13 @@ if __name__ == "__main__":
     # dataloaders
     data_lst, rhythm_lst, note_density_lst, chroma_lst = get_classic_piano()
     tlen, vlen = int(0.8 * len(data_lst)), int(0.9 * len(data_lst))
-    train_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    train_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="train")
     train_dl_dist = DataLoader(train_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
-    val_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    val_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="val")
     val_dl_dist = DataLoader(val_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
-    test_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    test_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="test")
     test_dl_dist = DataLoader(test_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
     dl = test_dl_dist
@@ -155,8 +149,10 @@ if __name__ == "__main__":
     print("Test")
     r_min, r_max, n_min, n_max, _, _ = train_test_evaluation(test_dl_dist)
 
-    rhythm_evaluator = RhythmEvaluator(test_ds_dist)
-    note_evaluator = NoteEvaluator(test_ds_dist)
+    print("STD: ", r_std, n_std)
+
+    rhythm_evaluator = RhythmEvaluator(test_ds_dist, epochs=2)
+    note_evaluator = NoteEvaluator(test_ds_dist, epochs=2)
     print("Rhythm Generation")
     rhythm_evaluator.evaluate(model, r_min, r_max, r_std, n_std)
     print("Note Generation")

@@ -1,6 +1,9 @@
+'''
+Controllability evaluation of Music FaderNets, single VAE (Pati et al.).
+'''
 import json
 import torch
-from uni_model_2 import *
+from model_v2 import *
 import os
 from sklearn.model_selection import train_test_split
 from ptb_v2 import *
@@ -17,18 +20,20 @@ from scipy.stats import pearsonr
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
-from adversarial_test_class import *
+from test_class import *
 sns.set()
 
 
 class SingleEvaluator(BaseEvaluator):
     def __init__(self, ds, epochs=10, num_of_samples=100):
+        self.epochs = epochs
+        self.num_of_samples = num_of_samples
         super().__init__(ds, epochs=epochs, num_of_samples=num_of_samples)
     
     def evaluate(self, model, min_val, max_val, r_std, n_std):
         c_lst, v_lst, r_lst, m_lst = [], [], [], []
         
-        for _ in range(10):
+        for _ in range(self.epochs):
             gap = (max_val - min_val) / 8
             value_lst = np.array([min_val + k * gap for k in range(8)])
             print(min_val, max_val)
@@ -42,7 +47,7 @@ class SingleEvaluator(BaseEvaluator):
 
             values_dict = {}
 
-            while len(result) < 100:
+            while len(result) < self.num_of_samples:
                 print(len(result), end="\r")
                 r_density_lst = []
                 n_density_lst = []
@@ -51,7 +56,7 @@ class SingleEvaluator(BaseEvaluator):
                 z_lst = []
 
                 random_idx = random.randint(0, len(self.ds))
-                d, r, n, c, c_r, c_n, r_density, n_density = self.ds[random_idx]
+                d, r, n, c, r_density, n_density = self.ds[random_idx]
                 d, r, n, c = torch.from_numpy(d).cuda().long(), torch.from_numpy(r).cuda().long(), \
                             torch.from_numpy(n).cuda().long(), torch.from_numpy(c).cuda().float()
                 
@@ -116,34 +121,30 @@ class SingleEvaluator(BaseEvaluator):
                 
                 i += 1
                 r_density_lst_new = []
+                n_density_lst_new = []
             
             # consistency
             r_out_all_lst = np.array(r_out_all_lst) / r_std
             n_out_all_lst = np.array(n_out_all_lst) / n_std
             
-            consistency_score = self.calculate_consistency(r_out_all_lst, n_out_all_lst)
-            variance_score = self.calculate_variance(r_out_all_lst, n_out_all_lst)
-            restrictiveness_score = self.calculate_restrictiveness(r_out_all_lst, n_out_all_lst)
+            consistency_score = 1 - self.calculate_consistency(r_out_all_lst, n_out_all_lst)
+            restrictiveness_score = 1 - self.calculate_restrictiveness(r_out_all_lst, n_out_all_lst)
             monotonicity_score = sum(result) / len(result)
 
             # monotonicity
             print("Generator consistency: ", consistency_score)
-            print("Generator variance: ", variance_score)
             print("Generator restrictiveness: ", restrictiveness_score)
             print("Generator monotonicity:", monotonicity_score)
             c_lst.append(consistency_score)
-            v_lst.append(variance_score)
             r_lst.append(restrictiveness_score)
             m_lst.append(monotonicity_score)
         
         c_lst = np.array(c_lst)
-        v_lst = np.array(v_lst)
         r_lst = np.array(r_lst)
         m_lst = np.array(m_lst)
 
         print("============================================")
         print("Consistency: {} +/- {}".format(np.mean(c_lst), np.std(c_lst)))
-        print("Variance: {} +/- {}".format(np.mean(v_lst), np.std(v_lst)))
         print("Restrictiveness: {} +/- {}".format(np.mean(r_lst), np.std(r_lst)))
         print("Monotonicity: {} +/- {}".format(np.mean(m_lst), np.std(m_lst)))
         print("============================================")  
@@ -173,6 +174,8 @@ class SingleEvaluator(BaseEvaluator):
 
 class SingleRhythmEvaluator(SingleEvaluator):
     def __init__(self, ds, epochs=10, num_of_samples=100):
+        self.epochs = epochs
+        self.num_of_samples = num_of_samples
         super().__init__(ds, epochs=epochs, num_of_samples=num_of_samples)
 
     def shift(self, model, d, r, n, c, target_z_value):
@@ -217,6 +220,8 @@ class SingleRhythmEvaluator(SingleEvaluator):
 
 class SingleNoteEvaluator(SingleEvaluator):
     def __init__(self, ds, epochs=10, num_of_samples=100):
+        self.epochs = epochs
+        self.num_of_samples = num_of_samples
         super().__init__(ds, epochs=epochs, num_of_samples=num_of_samples)
 
     def shift(self, model, d, r, n, c, target_z_value):
@@ -269,10 +274,9 @@ def run_through(dl):
     temp_count = 0
 
     for j, x in tqdm(enumerate(dl), total=len(dl)):
-        d, r, n, c, c_r, c_n, r_density, n_density = x
+        d, r, n, c, r_density, n_density = x
         d, r, n, c = d.cuda().long(), r.cuda().long(), \
                     n.cuda().long(), c.cuda().float()
-        c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
         
         r_lst.append(r)
         n_lst.append(n)
@@ -282,9 +286,6 @@ def run_through(dl):
         d_oh = convert_to_one_hot(d, EVENT_DIMS)
         r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
         n_oh = convert_to_one_hot(n, NOTE_DIMS)
-
-        c_r_oh = convert_to_one_hot(c_r, 4)
-        c_n_oh = convert_to_one_hot(c_n, 4)
 
         res = model(d_oh, c)
 
@@ -313,12 +314,6 @@ def train_test_evaluation(dl, is_hierachical=False, is_vgmidi=False):
         r_lst, n_lst, \
         r_min, r_max, n_min, n_max = run_through(dl)
 
-    # consistency
-    # print("Rhythm consistency")
-    # consistency_metric(r_lst, z_lst, gt_is_one=False)
-    # print("Note consistency")
-    # consistency_metric(n_lst, z_lst, gt_is_one=True)
-
     # monotonicity
     r_density_lst = np.expand_dims(np.array(r_density_lst), axis=-1)
     z_r_0_lst = np.expand_dims(z_lst[:, 0], axis=-1)
@@ -344,7 +339,7 @@ def train_test_evaluation(dl, is_hierachical=False, is_vgmidi=False):
 
 if __name__ == "__main__":
     # some initialization
-    with open('uni_model_config_2.json') as f:
+    with open('model_config_v2.json') as f:
         args = json.load(f)
     if not os.path.isdir('log'):
         os.mkdir('log')
@@ -359,8 +354,6 @@ if __name__ == "__main__":
     EVENT_DIMS = 342
     RHYTHM_DIMS = 3
     NOTE_DIMS = 16
-    TEMPO_DIMS = 264
-    VELOCITY_DIMS = 126
     CHROMA_DIMS = 24
 
     is_adversarial = False
@@ -368,7 +361,7 @@ if __name__ == "__main__":
     save_path = "params/music_attr_vae_reg_singlevae.pt"
     
     model = MusicAttrSingleVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-                        tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+                        chroma_dims=CHROMA_DIMS,
                         hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
                         n_step=args['time_step'])
 
@@ -391,13 +384,13 @@ if __name__ == "__main__":
     # dataloaders
     data_lst, rhythm_lst, note_density_lst, chroma_lst = get_classic_piano()
     tlen, vlen = int(0.8 * len(data_lst)), int(0.9 * len(data_lst))
-    train_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    train_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="train")
     train_dl_dist = DataLoader(train_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
-    val_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    val_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="val")
     val_dl_dist = DataLoader(val_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
-    test_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+    test_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                     chroma_lst, mode="test")
     test_dl_dist = DataLoader(test_ds_dist, batch_size=batch_size, shuffle=False, num_workers=0)
     dl = test_dl_dist
@@ -410,9 +403,9 @@ if __name__ == "__main__":
     r_min, r_max, n_min, n_max, _, _ = train_test_evaluation(test_dl_dist, is_hierachical=True)
 
     print("Rhythm Generation")
-    rhythm_evaluator = SingleRhythmEvaluator(test_ds_dist)
+    rhythm_evaluator = SingleRhythmEvaluator(test_ds_dist, epochs=2, num_of_samples=20)
     rhythm_evaluator.evaluate(model, r_min, r_max, r_std, n_std)
     
     print("Note Generation")
-    note_evaluator = SingleNoteEvaluator(test_ds_dist)
+    note_evaluator = SingleNoteEvaluator(test_ds_dist, epochs=2, num_of_samples=20)
     note_evaluator.evaluate(model, r_min, r_max, r_std, n_std)

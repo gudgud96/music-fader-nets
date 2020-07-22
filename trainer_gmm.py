@@ -1,19 +1,19 @@
+'''
+Music FaderNets, GM-VAE model.
+'''
 import json
 import torch
 import os
 import numpy as np
 from gmm_model import *
-# from data_loader import MusicArrayLoader
 from torch import optim
 from torch.distributions import kl_divergence, Normal
 from torch.nn import functional as F
 from torch.optim.lr_scheduler import ExponentialLR
 from sklearn.model_selection import train_test_split
-from adversarial_test import *
 from polyphonic_event_based_v2 import parse_pretty_midi
 from collections import Counter
 from sklearn.metrics import accuracy_score
-
 from ptb_v2 import *
 
 
@@ -35,15 +35,10 @@ save_path_timing = 'params/{}.pt'.format(args['name'] + "_" + timestamp)
 EVENT_DIMS = 342
 RHYTHM_DIMS = 3
 NOTE_DIMS = 16
-TEMPO_DIMS = 264
-VELOCITY_DIMS = 126
 CHROMA_DIMS = 24
 
-is_adversarial = args["is_adversarial"]
-print("Is adversarial: {}".format(is_adversarial))
-
 model = MusicAttrRegGMVAE(roll_dims=EVENT_DIMS, rhythm_dims=RHYTHM_DIMS, note_dims=NOTE_DIMS, 
-                        tempo_dims=TEMPO_DIMS, velocity_dims=VELOCITY_DIMS, chroma_dims=CHROMA_DIMS,
+                        chroma_dims=CHROMA_DIMS,
                         hidden_dims=args['hidden_dim'], z_dims=args['z_dim'], 
                         n_step=args['time_step'],
                         n_component=args['num_clusters'])
@@ -72,40 +67,37 @@ print("Loading Yamaha...")
 is_shuffle = True
 data_lst, rhythm_lst, note_density_lst, chroma_lst = get_classic_piano()
 tlen, vlen = int(0.8 * len(data_lst)), int(0.9 * len(data_lst))
-train_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+train_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, mode="train")
 train_dl_dist = DataLoader(train_ds_dist, batch_size=batch_size, shuffle=is_shuffle, num_workers=0)
-val_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+val_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, mode="val")
 val_dl_dist = DataLoader(val_ds_dist, batch_size=batch_size, shuffle=is_shuffle, num_workers=0)
-test_ds_dist = MusicAttrDataset2(data_lst, rhythm_lst, note_density_lst, 
+test_ds_dist = YamahaDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, mode="test")
 test_dl_dist = DataLoader(test_ds_dist, batch_size=batch_size, shuffle=is_shuffle, num_workers=0)
 dl = train_dl_dist
+print("Yamaha: Train / Validation / Test")
 print(len(train_ds_dist), len(val_ds_dist), len(test_ds_dist))
 
 # vgmidi dataloaders
 print("Loading VGMIDI...")
 data_lst, rhythm_lst, note_density_lst, arousal_lst, valence_lst, chroma_lst = get_vgmidi()
-vgm_train_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+vgm_train_ds_dist = VGMIDIDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, arousal_lst, valence_lst, mode="train")
 vgm_train_dl_dist = DataLoader(vgm_train_ds_dist, batch_size=32, shuffle=is_shuffle, num_workers=0)
-vgm_val_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+vgm_val_ds_dist = VGMIDIDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, arousal_lst, valence_lst, mode="val")
 vgm_val_dl_dist = DataLoader(vgm_val_ds_dist, batch_size=32, shuffle=is_shuffle, num_workers=0)
-vgm_test_ds_dist = MusicAttrDataset3(data_lst, rhythm_lst, note_density_lst, 
+vgm_test_ds_dist = VGMIDIDataset(data_lst, rhythm_lst, note_density_lst, 
                                 chroma_lst, arousal_lst, valence_lst, mode="test")
 vgm_test_dl_dist = DataLoader(vgm_test_ds_dist, batch_size=32, shuffle=is_shuffle, num_workers=0)
+print("VGMIDI: Train / Validation / Test")
 print(len(vgm_train_ds_dist), len(vgm_val_ds_dist), len(vgm_test_ds_dist))
 print()
 
-is_class = args["is_class"]
-is_res = args["is_res"]
-# end of initialization
-
 
 # ====================== TRAINING ===================== #
-
 def std_normal(shape):
     N = Normal(torch.zeros(shape), torch.ones(shape))
     if torch.cuda.is_available():
@@ -133,9 +125,7 @@ def loss_function(out, d,
     if step < 1000:
         beta0 = 0
     else:
-        beta0 = min((step - 1000) / 1000 * beta, beta) 
-    #     beta0 = np.exp(0.002 * (step - 6000)) * beta
-    #     beta0 = min(beta, beta0)
+        beta0 = min((step - 10000) / 10000 * beta, beta) 
 
     # Reconstruction loss
     CE_X = F.nll_loss(out.view(-1, out.size(-1)),
@@ -156,6 +146,7 @@ def loss_function(out, d,
     kld_lat_r_total, kld_lat_n_total = torch.Tensor([0]).cuda(), torch.Tensor([0]).cuda()
     kld_cls_r, kld_cls_n = torch.Tensor([0]).cuda(), torch.Tensor([0]).cuda()
 
+    # Unsupervised loss
     if not is_supervised:
         # KL latent loss
         n_component = qy_x_r.shape[-1]
@@ -186,6 +177,7 @@ def loss_function(out, d,
 
         loss = CE + beta0 * (kld_lat_r_total + kld_lat_n_total + kld_cls_r + kld_cls_n)
     
+    # Supervised loss
     else:
         mu_pz_y_r, var_pz_y_r = model.mu_r_lookup(y_label.cuda().long()), model.logvar_r_lookup(y_label.cuda().long()).exp_()
         dis_pz_y_r = Normal(mu_pz_y_r, var_pz_y_r)
@@ -197,18 +189,14 @@ def loss_function(out, d,
 
         kld_lat_r_total, kld_lat_n_total = kld_lat_r.mean(), kld_lat_n.mean()
 
-        label_clf_loss = nn.CrossEntropyLoss()(qy_x_r, y_label.cuda().long()) + nn.CrossEntropyLoss()(qy_x_n, y_label.cuda().long())
+        label_clf_loss = nn.CrossEntropyLoss()(qy_x_r, y_label.cuda().long()) + \
+                            nn.CrossEntropyLoss()(qy_x_n, y_label.cuda().long())
         loss = CE + beta0 * (kld_lat_r_total + kld_lat_n_total) + label_clf_loss
         
     return loss, CE_X, CE_R, CE_N, kld_lat_r_total, kld_lat_n_total, kld_cls_r, kld_cls_n
 
 
-def latent_regularized_loss_function(z_out, r, n, a=None, c=None):
-    return latent_regularized_loss_function_v1(z_out, r, n, a=a)
-    # return latent_regularized_loss_function_glsr(z_out, r, n, c)
-
-
-def latent_regularized_loss_function_v1(z_out, r, n, a=None):
+def latent_regularized_loss_function(z_out, r, n):
     # regularization loss - Pati et al. 2019
     z_r, z_n = z_out
 
@@ -226,23 +214,14 @@ def latent_regularized_loss_function_v1(z_out, r, n, a=None):
     D_z_n = z_n_new[:, 0].reshape(-1, 1) - z_n_new[:, 0]
     l_n = torch.nn.MSELoss(reduction="mean")(torch.tanh(D_z_n), torch.sign(D_attr_n))
 
-    if not(a is None):
-        arousal = a
-        D_attr_a = torch.from_numpy(np.subtract.outer(arousal, arousal)).cuda().float()
-        D_z_h = z_h[:, 0].reshape(-1, 1) - z_h[:, 0]
-        l_a = torch.nn.MSELoss(reduction="mean")(torch.tanh(D_z_h), torch.sign(D_attr_a))
-    else:
-        l_a = 0
-
-    return l_r, l_n, l_a
+    return l_r, l_n
 
 
-def train(step, d_oh, r_oh, n_oh,
-          d, r, n, c, c_r, c_n, c_r_oh, c_n_oh, r_density, n_density,
+def train(step, d_oh, r_oh, n_oh, d, r, n, c, r_density, n_density,
           is_supervised=False, y_label=None):
     
     optimizer.zero_grad()
-    res = model(d_oh, r_oh, n_oh, c, c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+    res = model(d_oh, r_oh, n_oh, c)
 
     # package output
     output, dis, z_out, logLogit_out, qy_x_out, y_out = res
@@ -264,7 +243,7 @@ def train(step, d_oh, r_oh, n_oh,
     
     # calculate latent regularization loss
     l_r, l_n = torch.Tensor([0]), torch.Tensor([0])
-    l_r, l_n, _ = latent_regularized_loss_function(z_out, r_density, n_density, c=c)
+    l_r, l_n = latent_regularized_loss_function(z_out, r_density, n_density)
     loss += l_r + l_n
     
     loss.backward()
@@ -279,11 +258,10 @@ def train(step, d_oh, r_oh, n_oh,
     return step, output
 
 
-def evaluate(step, d_oh, r_oh, n_oh,
-             d, r, n, c, c_r, c_n, c_r_oh, c_n_oh, r_density, n_density,
+def evaluate(step, d_oh, r_oh, n_oh, d, r, n, c, r_density, n_density,
              is_supervised=False, y_label=None):
     
-    res = model(d_oh, r_oh, n_oh, c, c_r_oh, c_n_oh, is_class=is_class, is_res=is_res)
+    res = model(d_oh, r_oh, n_oh, c)
 
     # package output
     output, dis, z_out, logLogit_out, qy_x_out, y_out = res
@@ -305,7 +283,7 @@ def evaluate(step, d_oh, r_oh, n_oh,
     
     # calculate latent regularization loss
     l_r, l_n = torch.Tensor([0]), torch.Tensor([0])
-    l_r, l_n, _ = latent_regularized_loss_function(z_out, r_density, n_density, c=c)
+    l_r, l_n = latent_regularized_loss_function(z_out, r_density, n_density)
     loss += l_r + l_n
 
     kld_latent = kld_lat_r_total + kld_lat_n_total
@@ -326,23 +304,17 @@ def convert_to_one_hot(input, dims):
 
 
 def training_phase(step):
-
+    print("D - Data, R - Rhythm, N - Note, RD - Reg. Rhythm, ND- Reg. Note, KLD-L: KLD Latent, KLD-C: KLD Class")
     for i in range(1, args['n_epochs'] + 1):
         print("Epoch {} / {}".format(i, args['n_epochs']))
-
-        batch_loss, batch_test_loss = 0, 0
-        b_CE_X, b_CE_R, b_CE_N, b_CE_C, b_CE_T, b_CE_V = 0, 0, 0, 0, 0, 0
-        t_CE_X, t_CE_R, t_CE_N, t_CE_C, t_CE_T, t_CE_V = 0, 0, 0, 0, 0, 0
-        b_l_r, b_l_n, t_l_r, t_l_n = 0, 0, 0, 0
-        b_l_adv_r, b_l_adv_n, t_l_adv_r, t_l_adv_n = 0, 0, 0, 0
 
         # =================== TRAIN VGMIDI ======================== #
 
         batch_loss, batch_test_loss = 0, 0
-        b_CE_X, b_CE_R, b_CE_N, b_CE_C, b_CE_T, b_CE_V = 0, 0, 0, 0, 0, 0
-        t_CE_X, t_CE_R, t_CE_N, t_CE_C, t_CE_T, t_CE_V = 0, 0, 0, 0, 0, 0
+        b_CE_X, b_CE_R, b_CE_N = 0, 0, 0
+        t_CE_X, t_CE_R, t_CE_N = 0, 0, 0
         b_l_r, b_l_n, t_l_r, t_l_n = 0, 0, 0, 0
-        b_l_adv_r, b_l_adv_n, t_l_adv_r, t_l_adv_n = 0, 0, 0, 0
+        b_kld_latent, b_kld_class, t_kld_latent, t_kld_class  = 0, 0, 0, 0
         
         # train on vgmidi
         for j, x in tqdm(enumerate(vgm_train_dl_dist), total=len(vgm_train_dl_dist)):
@@ -355,25 +327,19 @@ def training_phase(step):
             r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
             n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-            # c_r_oh = convert_to_one_hot(c_r, 3)
-            # c_n_oh = convert_to_one_hot(c_n, 3)
-
             step, loss = train(step, d_oh, r_oh, n_oh,
-                                d, r, n, c, None, None, None, None, r_density, n_density,
+                                d, r, n, c, r_density, n_density,
                                 is_supervised=True, y_label=a)
-            loss, CE_X, CE_R, CE_N, l_r, l_n, l_adv_r, l_adv_n = loss
+            loss, CE_X, CE_R, CE_N, l_r, l_n, kld_latent, kld_class = loss
             batch_loss += loss
 
-            inputs = b_CE_X, b_CE_R, b_CE_N
-            updates = CE_X, CE_R, CE_N
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            b_CE_X, b_CE_R, b_CE_N = outputs
+            b_CE_X += CE_X
+            b_CE_R += CE_R
+            b_CE_N += CE_N
             b_l_r += l_r
             b_l_n += l_n
-            b_l_adv_r += l_adv_r
-            b_l_adv_n += l_adv_n
+            b_kld_latent += kld_latent
+            b_kld_class += kld_class
         
         # evaluate on vgmidi
         for j, x in tqdm(enumerate(vgm_val_dl_dist), total=len(vgm_val_dl_dist)):
@@ -386,121 +352,106 @@ def training_phase(step):
             r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
             n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-            # c_r_oh = convert_to_one_hot(c_r, 3)
-            # c_n_oh = convert_to_one_hot(c_n, 3)
-
             loss = evaluate(step - 1, d_oh, r_oh, n_oh,
-                            d, r, n, c, None, None, None, None, r_density, n_density,
+                            d, r, n, c, r_density, n_density,
                             is_supervised=True, y_label=a)
-            loss, CE_X, CE_R, CE_N, l_r, l_n, l_adv_r, l_adv_n = loss
+            loss, CE_X, CE_R, CE_N, l_r, l_n, kld_latent, kld_class = loss
             batch_test_loss += loss
-
-            inputs = t_CE_X, t_CE_R, t_CE_N
-            updates = CE_X, CE_R, CE_N
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            t_CE_X, t_CE_R, t_CE_N = outputs
+            
+            t_CE_X += CE_X
+            t_CE_R += CE_R
+            t_CE_N += CE_N
             t_l_r += l_r
             t_l_n += l_n
-            t_l_adv_r += l_adv_r
-            t_l_adv_n += l_adv_n
+            t_kld_latent += kld_latent
+            t_kld_class += kld_class
         
         print('batch loss: {:.5f}  {:.5f}'.format(batch_loss / len(vgm_train_dl_dist),
                                                   batch_test_loss / len(vgm_val_dl_dist)))
-        print("Data, Rhythm, Note, Chroma")
-        print("train loss by term: {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}".format(
+
+        print("train loss by term - D: {:.4f} R: {:.4f} N: {:.4f} RD: {:.4f} ND: {:.4f} KLD-L: {:.4f} KLD-C: {:.4f}".format(
             b_CE_X / len(vgm_train_dl_dist), b_CE_R / len(vgm_train_dl_dist), 
             b_CE_N / len(vgm_train_dl_dist),
             b_l_r / len(vgm_train_dl_dist), b_l_n / len(vgm_train_dl_dist),
-            b_l_adv_r / len(vgm_train_dl_dist), b_l_adv_n / len(vgm_train_dl_dist)
+            b_kld_latent / len(vgm_train_dl_dist), b_kld_class / len(vgm_train_dl_dist)
         ))
-        print("test loss by term: {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}".format(
+        print("test loss by term - D: {:.4f} R: {:.4f} N: {:.4f} RD: {:.4f} ND: {:.4f} KLD-L: {:.4f} KLD-C: {:.4f}".format(
             t_CE_X / len(vgm_val_dl_dist), t_CE_R / len(vgm_val_dl_dist), 
             t_CE_N / len(vgm_val_dl_dist),
             t_l_r / len(vgm_val_dl_dist), t_l_n / len(vgm_val_dl_dist),
-            t_l_adv_r / len(vgm_val_dl_dist), t_l_adv_n / len(vgm_val_dl_dist)
+            t_kld_latent / len(vgm_val_dl_dist), t_kld_class / len(vgm_val_dl_dist)
         ))
 
         # =================== TRAIN YAMAHA ======================== #
+        
+        batch_loss, batch_test_loss = 0, 0
+        b_CE_X, b_CE_R, b_CE_N = 0, 0, 0
+        t_CE_X, t_CE_R, t_CE_N = 0, 0, 0
+        b_l_r, b_l_n, t_l_r, t_l_n = 0, 0, 0, 0
+        b_kld_latent, b_kld_class, t_kld_latent, t_kld_class  = 0, 0, 0, 0
 
         # train on yamaha
         for j, x in tqdm(enumerate(train_dl_dist), total=len(train_dl_dist)):
 
-            d, r, n, c, c_r, c_n, r_density, n_density = x
+            d, r, n, c, r_density, n_density = x
             d, r, n, c = d.cuda().long(), r.cuda().long(), \
                          n.cuda().long(), c.cuda().float()
-            c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
 
             d_oh = convert_to_one_hot(d, EVENT_DIMS)
             r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
             n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-            c_r_oh = convert_to_one_hot(c_r, 3)
-            c_n_oh = convert_to_one_hot(c_n, 3)
-
             step, loss = train(step, d_oh, r_oh, n_oh, d, r, n, c, 
-                               c_r, c_n, c_r_oh, c_n_oh, r_density, n_density)
+                               r_density, n_density)
             loss, CE_X, CE_R, CE_N, l_r, l_n, kld_latent, kld_class = loss
             batch_loss += loss
 
-            inputs = b_CE_X, b_CE_R, b_CE_N
-            updates = CE_X, CE_R, CE_N
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            b_CE_X, b_CE_R, b_CE_N = outputs
+            b_CE_X += CE_X
+            b_CE_R += CE_R
+            b_CE_N += CE_N
             b_l_r += l_r
             b_l_n += l_n
-            b_l_adv_r += kld_latent
-            b_l_adv_n += kld_class 
+            b_kld_latent += kld_latent
+            b_kld_class += kld_class
 
         # evaluate on yamaha
         for j, x in tqdm(enumerate(val_dl_dist), total=len(val_dl_dist)):
             
-            d, r, n, c, c_r, c_n, r_density, n_density = x
+            d, r, n, c, r_density, n_density = x
             d, r, n, c = d.cuda().long(), r.cuda().long(), \
                          n.cuda().long(), c.cuda().float()
-            c_r, c_n, = c_r.cuda().long(), c_n.cuda().long()
 
             d_oh = convert_to_one_hot(d, EVENT_DIMS)
             r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
             n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-            c_r_oh = convert_to_one_hot(c_r, 3)
-            c_n_oh = convert_to_one_hot(c_n, 3)
-
             loss = evaluate(step - 1, d_oh, r_oh, n_oh, d, r, n, c, 
-                            c_r, c_n, c_r_oh, c_n_oh, r_density, n_density)
+                            r_density, n_density)
 
             loss, CE_X, CE_R, CE_N, l_r, l_n, kld_latent, kld_class = loss
             batch_test_loss += loss
 
-            inputs = t_CE_X, t_CE_R, t_CE_N
-            updates = CE_X, CE_R, CE_N
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            t_CE_X, t_CE_R, t_CE_N = outputs
+            t_CE_X += CE_X
+            t_CE_R += CE_R
+            t_CE_N += CE_N
             t_l_r += l_r
             t_l_n += l_n
-            t_l_adv_r += kld_latent
-            t_l_adv_n += kld_class
+            t_kld_latent += kld_latent
+            t_kld_class += kld_class
         
         print('batch loss: {:.5f}  {:.5f}'.format(batch_loss / len(train_dl_dist),
                                                   batch_test_loss / len(val_dl_dist)))
-        print("Data, Rhythm, Note, Chroma")
-        print("train loss by term: {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}".format(
+        print("train loss by term - D: {:.4f} R: {:.4f} N: {:.4f} RD: {:.4f} ND: {:.4f} KLD-L: {:.4f} KLD-C: {:.4f}".format(
             b_CE_X / len(train_dl_dist), b_CE_R / len(train_dl_dist), 
             b_CE_N / len(train_dl_dist),
             b_l_r / len(train_dl_dist), b_l_n / len(train_dl_dist),
-            b_l_adv_r / len(train_dl_dist), b_l_adv_n / len(train_dl_dist)
+            b_kld_latent / len(train_dl_dist), b_kld_class / len(train_dl_dist)
         ))
-        print("test loss by term: {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}  {:.5f}".format(
+        print("test loss by term - D: {:.4f} R: {:.4f} N: {:.4f} RD: {:.4f} ND: {:.4f} KLD-L: {:.4f} KLD-C: {:.4f}".format(
             t_CE_X / len(val_dl_dist), t_CE_R / len(val_dl_dist), 
             t_CE_N / len(val_dl_dist),
             t_l_r / len(val_dl_dist), t_l_n / len(val_dl_dist),
-            t_l_adv_r / len(val_dl_dist), t_l_adv_n / len(val_dl_dist)
+            t_kld_latent / len(val_dl_dist), t_kld_class / len(val_dl_dist)
         ))
 
         print("Saving model...")
@@ -527,13 +478,11 @@ def evaluation_phase():
     
     def run(dl, is_vgmidi=False):
         
-        t_CE_X, t_CE_R, t_CE_N, t_CE_C, t_CE_T, t_CE_V = 0, 0, 0, 0, 0, 0
+        t_CE_X, t_CE_R, t_CE_N = 0, 0, 0
         t_l_r, t_l_n = 0, 0
-        t_l_adv_r, t_l_adv_n = 0, 0
-        t_acc_x, t_acc_r, t_acc_n, t_acc_t, t_acc_v = 0, 0, 0, 0, 0
-        c_acc_r, c_acc_n, c_acc_t, c_acc_v = 0, 0, 0, 0
+        t_kld_latent, t_kld_class = 0, 0
+        t_acc_x, t_acc_r, t_acc_n, t_acc_a_r, t_acc_a_n = 0, 0, 0, 0, 0
         data_len = 0
-        linear_r, linear_n = [], []
 
         for i, x in tqdm(enumerate(dl), total=len(dl)):
             d, r, n, c, a, v, r_density, n_density = x
@@ -544,7 +493,7 @@ def evaluation_phase():
             r_oh = convert_to_one_hot(r, RHYTHM_DIMS)
             n_oh = convert_to_one_hot(n, NOTE_DIMS)
 
-            res = model(d_oh, r_oh, n_oh, c, None, None, is_class=is_class, is_res=is_res)
+            res = model(d_oh, r_oh, n_oh, c)
 
             # package output
             output, dis, z_out, logLogit_out, qy_x_out, y_out = res
@@ -578,22 +527,19 @@ def evaluation_phase():
                                                     y_label=a)
             
             # calculate latent regularization loss
-            l_r, l_n = torch.Tensor([0]), torch.Tensor([0])
-            l_r, l_n, _ = latent_regularized_loss_function(z_out, r_density, n_density, c=c)
+            l_r, l_n = latent_regularized_loss_function(z_out, r_density, n_density)
 
             # adversarial loss
-            l_adv_r, l_adv_n = kld_lat_r_total.item() +  kld_lat_n_total.item(), \
-                                kld_cls_r.item() + kld_cls_n.item()
-
-            # update
-            inputs = t_CE_X, t_CE_R, t_CE_N
-            updates = CE_X.item(), CE_R.item(), CE_N.item()
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            t_CE_X, t_CE_R, t_CE_N = outputs
+            kld_latent, kld_class = kld_lat_r_total.item() +  kld_lat_n_total.item(), \
+                                    kld_cls_r.item() + kld_cls_n.item()
+            
+            t_CE_X += CE_X
+            t_CE_R += CE_R
+            t_CE_N += CE_N
             t_l_r += l_r.item()
             t_l_n += l_n.item()
+            t_kld_latent += kld_latent
+            t_kld_class += kld_class
             
             # calculate accuracy
             def acc(a, b, t, trim=False):
@@ -631,31 +577,13 @@ def evaluation_phase():
             else:
                 acc_q_x_r, acc_q_x_n = 0, 0
 
-            # accuracy update store
-            inputs = t_acc_x, t_acc_r, t_acc_n, t_acc_t, t_acc_v
-            updates = acc_x, acc_r, acc_n, acc_q_x_r, acc_q_x_n
-            outputs = []
-            for idx in range(len(inputs)):
-                outputs.append(inputs[idx] + updates[idx])
-            t_acc_x, t_acc_r, t_acc_n, t_acc_t, t_acc_v = outputs
-
-            from sklearn.linear_model import LinearRegression
-
-            reg = LinearRegression().fit(z_r[:, 0].unsqueeze(-1).cpu().detach().numpy(), 
-                                        r_density.unsqueeze(-1).cpu().detach().numpy())
-            linear_r.append(reg.score(z_r[:, 0].unsqueeze(-1).cpu().detach().numpy(), 
-                    r_density.unsqueeze(-1).cpu().detach().numpy()))
-
-            reg = LinearRegression().fit(z_n[:, 0].unsqueeze(-1).cpu().detach().numpy(), 
-                                        n_density.unsqueeze(-1).cpu().detach().numpy())
-            linear_n.append(reg.score(z_n[:, 0].unsqueeze(-1).cpu().detach().numpy(), 
-                    n_density.unsqueeze(-1).cpu().detach().numpy()))
-        
-        
-        print(sum(linear_r) / len(linear_r), sum(linear_n) / len(linear_n))
+            t_acc_x += acc_x
+            t_acc_r += acc_r
+            t_acc_n += acc_n
+            t_acc_a_r += acc_q_x_r
+            t_acc_a_n += acc_q_x_n
 
         # Print results
-        print(data_len)
         print("CE: {:.4}  {:.4}  {:.4}".format(t_CE_X / len(dl),
                                                     t_CE_R / len(dl), 
                                                     t_CE_N / len(dl)))
@@ -669,8 +597,8 @@ def evaluation_phase():
         print("Acc: {:.4}  {:.4}  {:.4}  {:.4}  {:.4}".format(t_acc_x / data_len,
                                                             t_acc_r / data_len, 
                                                             t_acc_n / data_len,
-                                                            t_acc_t / len(dl),
-                                                            t_acc_v / len(dl)))
+                                                            t_acc_a_r / data_len,
+                                                            t_acc_a_n / data_len))
 
     dl = DataLoader(train_ds_dist, batch_size=128, shuffle=False, num_workers=0)
     run(dl)
