@@ -48,8 +48,7 @@ This research work is published at ISMIR 2020 as a conference paper.
 ```
 @inproceedings{tan20music,
   author = {Tan, Hao Hao and Herremans, Dorien},
-  booktitle={Proc. of the International
-Society for Music Information Retrieval Conference},
+  booktitle={Proc. of the International Society for Music Information Retrieval Conference},
   title = {Music FaderNets: Controllable Music Generation Based On High-Level Features via Low-Level Feature Modelling},
   year={2020}
 }
