@@ -1,4 +1,4 @@
-## Music FaderNets
+# Music FaderNets
 
 This repository contains code for the paper ["Music FaderNets: Controllable Music Generation Based On High-Level Features via Low-Level Feature Modelling"]() by Hao Hao Tan and Dorien Herremans.  
 
