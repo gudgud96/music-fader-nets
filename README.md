@@ -1,6 +1,6 @@
 # Music FaderNets
 
-This repository contains code for the paper ["Music FaderNets: Controllable Music Generation Based On High-Level Features via Low-Level Feature Modelling"]() by Hao Hao Tan and Dorien Herremans.  
+This repository contains code for the paper ["Music FaderNets: Controllable Music Generation Based On High-Level Features via Low-Level Feature Modelling"](https://arxiv.org/abs/2007.15474) by Hao Hao Tan and Dorien Herremans.  
 
 Representations of high-level musical qualities are not easy to learn with supervised learning techniques, either because of the insufficiency of labels, or the subjectiveness (and hence large variance) in human-annotated labels. We propose to use low-level features as "bridges" to between the music and the high level features. Hence, the model consists of:
 
@@ -23,9 +23,10 @@ Representations of high-level musical qualities are not easy to learn with super
 ## Train
 
 1. Download the [Piano e-Competition](https://github.com/jason9693/MusicTransformer-tensorflow2.0/blob/master/dataset/scripts/ecomp_piano_downloader.sh) dataset and [VGMIDI](https://github.com/lucasnfe/vgmidi) dataset. `ptb_v2.py` should parse the dataset into desired event tokens while executing the trainer file.
-2. Modify the training configurations in `model_config_v2.json`.
-3. Run `python <the-trainer-filename>`.
-4. The trained model weights can be found in `params/`folder.
+2. For VGMIDI, the pre-processed labels and MIDI token sequences are attached [here](https://github.com/gudgud96/music-fader-nets/releases). Kindly download them and ensure that the pathing within `ptb_v2.py` is correct.
+3. Modify the training configurations in `model_config_v2.json`.
+4. Run `python <the-trainer-filename>`.
+5. The trained model weights can be found in `params/`folder.
 
 Note that to parse MIDI files into event tokens, [this fork of Magenta repo](https://github.com/gudgud96/magenta) is used with several modifications on the [token parser](https://github.com/gudgud96/magenta/tree/master/magenta).
 
@@ -38,7 +39,7 @@ A simple example for applying "shifting vectors" for arousal transfer with the G
 
 
 ## Resources
-- [arXiv paper]()
+- [arXiv paper](https://arxiv.org/abs/2007.15474)
 - [Demo website](https://music-fadernets.github.io/)
 
 ## Citation
