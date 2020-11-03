@@ -1,6 +1,6 @@
 # Music FaderNets
 
-**Updated 4.11.2020: Updated `arousal_transfer.ipynb` for ease of usage. Added VGMIDI pre-processed dataset in release section.
+**Updated 4.11.2020: Updated `arousal_transfer.ipynb` for ease of usage. Added VGMIDI pre-processed dataset in release section.**
 
 This repository contains code for the paper ["Music FaderNets: Controllable Music Generation Based On High-Level Features via Low-Level Feature Modelling"](https://arxiv.org/abs/2007.15474) by Hao Hao Tan and Dorien Herremans.  
 
